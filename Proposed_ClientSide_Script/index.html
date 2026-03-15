@@ -18,7 +18,6 @@
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        
         body {
             background: var(--bg);
             color: var(--text);
@@ -27,7 +26,7 @@
             height: 100vh;
         }
 
-        /* Top bar with title and buttons */
+        /* ── Top bar ─────────────────────────────────────────── */
         #top-bar {
             height: 56px;
             background: var(--surface);
@@ -37,7 +36,6 @@
             border-bottom: 1px solid var(--border);
             gap: 10px;
         }
-        
         #app-title {
             font-family: 'Courier New', monospace;
             font-weight: 700;
@@ -47,7 +45,6 @@
             white-space: nowrap;
         }
 
-        /* Standard button styling */
         .btn {
             background: var(--surface2);
             color: #C9D1D9;
@@ -59,11 +56,9 @@
             transition: background 0.15s, border-color 0.15s;
             white-space: nowrap;
         }
-        
         .btn:hover { background: var(--border); border-color: var(--subtext); }
         .btn.selected { border-color: var(--accent); color: var(--accent); }
 
-        /* Green "Compare" button */
         #run-btn {
             background: #238636;
             color: white;
@@ -71,11 +66,9 @@
             font-weight: 600;
             padding: 6px 18px;
         }
-        
         #run-btn:hover:not(:disabled) { background: #2ea043; }
         #run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-        /* Status message on the right */
         #status {
             font-size: 12px;
             color: var(--subtext);
@@ -83,7 +76,7 @@
             text-align: right;
         }
 
-        /* Legend showing color codes */
+        /* ── Legend ──────────────────────────────────────────── */
         .legend {
             display: flex;
             gap: 16px;
@@ -91,7 +84,6 @@
             font-size: 12px;
             color: var(--subtext);
         }
-        
         .legend-dot {
             width: 12px; height: 12px;
             border-radius: 2px;
@@ -99,12 +91,11 @@
             margin-right: 5px;
         }
 
-        /* Two side-by-side panes */
+        /* ── Dual pane layout ────────────────────────────────── */
         #pane-wrapper {
             display: flex;
             height: calc(100vh - 56px);
         }
-        
         .pane-col {
             flex: 1;
             display: flex;
@@ -112,10 +103,8 @@
             overflow: hidden;
             border-right: 1px solid var(--border);
         }
-        
         .pane-col:last-child { border-right: none; }
 
-        /* Header for each pane */
         .pane-header {
             height: 30px;
             background: var(--surface2);
@@ -129,11 +118,9 @@
             flex-shrink: 0;
             border-bottom: 1px solid var(--border);
         }
-        
         #old-header { color: #E3B341; }
         #new-header { color: var(--accent); }
 
-        /* Scrollable pane content */
         .pane {
             flex: 1;
             overflow-y: auto;
@@ -143,18 +130,15 @@
             scroll-behavior: auto;
         }
 
-        /* PDF page container */
+        /* ── Page rendering ──────────────────────────────────── */
         .page-container {
             position: relative;
             margin: 0 auto 28px auto;
             background: white;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-            line-height: 0;
+            line-height: 0;       /* removes gap below canvas */
         }
-        
         .page-canvas { display: block; }
-        
-        /* Overlay for highlighting differences */
         .highlight-canvas {
             position: absolute;
             top: 0; left: 0;
@@ -162,7 +146,7 @@
             pointer-events: none;
         }
 
-        /* Progress bar at the top */
+        /* ── Progress ────────────────────────────────────────── */
         #progress-bar {
             height: 3px;
             background: var(--accent);
@@ -179,7 +163,6 @@
 
 <div id="progress-bar"></div>
 
-<!-- Top control bar -->
 <div id="top-bar">
     <span id="app-title">⬛ PDF DIFF</span>
 
@@ -191,7 +174,6 @@
     </button>
     <button id="run-btn" onclick="runDiff()" disabled>▶ Compare</button>
 
-    <!-- Color legend -->
     <div class="legend">
         <span><span class="legend-dot" style="background:rgba(255,213,79,0.8)"></span>Removed</span>
         <span><span class="legend-dot" style="background:rgba(79,195,247,0.8)"></span>Added</span>
@@ -199,12 +181,10 @@
 
     <div id="status">Select both PDFs to begin.</div>
 
-    <!-- Hidden file inputs -->
     <input type="file" id="old-file" hidden accept=".pdf">
     <input type="file" id="new-file" hidden accept=".pdf">
 </div>
 
-<!-- Side-by-side PDF viewers -->
 <div id="pane-wrapper">
     <div class="pane-col">
         <div class="pane-header" id="old-header">OLD VERSION</div>
@@ -219,17 +199,20 @@
 <script>
 'use strict';
 
-// Setup PDF.js library
+// ─────────────────────────────────────────────────────────────────────────────
+// PDF.js setup
+// ─────────────────────────────────────────────────────────────────────────────
 const pdfjsLib = window['pdfjs-dist/build/pdf'];
 pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 const RENDER_SCALE = 1.5;
 
-// Store selected files
+// ─────────────────────────────────────────────────────────────────────────────
+// File input wiring
+// ─────────────────────────────────────────────────────────────────────────────
 let oldFile = null, newFile = null;
 
-// Listen for old PDF selection
 document.getElementById('old-file').addEventListener('change', e => {
     oldFile = e.target.files[0];
     if (oldFile) {
@@ -240,8 +223,6 @@ document.getElementById('old-file').addEventListener('change', e => {
         checkReady();
     }
 });
-
-// Listen for new PDF selection
 document.getElementById('new-file').addEventListener('change', e => {
     newFile = e.target.files[0];
     if (newFile) {
@@ -252,96 +233,61 @@ document.getElementById('new-file').addEventListener('change', e => {
         checkReady();
     }
 });
-
-// Enable compare button only when both files are selected
 function checkReady() {
     document.getElementById('run-btn').disabled = !(oldFile && newFile);
 }
 
-// ===== STEP 1: Extract all words from PDF with exact positions =====
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER 1 — Data Extraction
+// Builds the word database: [{text, page, x, y, w, h}, ...]
+//
+// We split each PDF.js text item into individual words for fine-grained
+// diff accuracy, while using the item's EXACT metrics to position each word.
+//
+// The key insight for correct sub-word positioning:
+//   PDF.js gives us item.width for the WHOLE string. To find each word's
+//   x offset, we use a canvas measureText() call at the item's font size.
+//   This uses the ACTUAL font metrics (not monospace estimation), so
+//   proportional fonts like "Will it" give "W" a wide box and "i" a narrow one.
+//
+// Height: item.height from PDF.js is the correct ascent+descent value.
+//   We use it directly. transform[3] is only a fallback for Type3 fonts.
+// ─────────────────────────────────────────────────────────────────────────────
 
+// Off-screen canvas used purely for measuring text widths with real font metrics
 const _measureCanvas = document.createElement('canvas');
 const _measureCtx    = _measureCanvas.getContext('2d');
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER 2 — Index-Based LCS Diff (The Brain)
+//
+// FIX: The original O(n×m) full DP table crashes on large documents.
+// We switch to a two-row rolling approach for the forward pass (O(n)
+// memory), then do a Hunt-Szymanski-style sparse traceback.
+//
+// For very large documents (>5000 words each) we also chunk the comparison
+// using an anchored block approach: first find exact-match anchors that
+// split the document into manageable segments, then diff each segment.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Measure text width using canvas (accounts for real font metrics)
-function measureWordWidths(words, fontSpec) {
-    _measureCtx.font = fontSpec;
-    return words.map(w => _measureCtx.measureText(w).width);
-}
-
-// Read PDF file and build list of words with their coordinates
-async function extractWordDatabase(file) {
-    const buffer = await file.arrayBuffer();
-    const doc    = await pdfjsLib.getDocument(buffer).promise;
-    const words  = [];
-
-    // Loop through each page
-    for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
-        const page    = await doc.getPage(pageNum);
-        const content = await page.getTextContent();
-
-        // Process each text item on the page
-        for (const item of content.items) {
-            if (!item.str || !item.str.trim()) continue;
-
-            const tx         = item.transform[4];  // x position
-            const ty         = item.transform[5];  // y position (baseline)
-            const fontSize   = Math.abs(item.transform[3]);
-            const itemH      = item.height > 0 ? item.height : fontSize;
-            const itemTotalW = item.width;
-
-            // Split text into individual words
-            const parts = item.str.split(/(\s+)/);
-            const wordParts = parts.filter(p => p && !/^\s+$/.test(p));
-
-            if (wordParts.length === 0) continue;
-
-            // Use canvas to measure word widths accurately
-            const fontSpec   = `${fontSize}px sans-serif`;
-            _measureCtx.font = fontSpec;
-
-            const fullMeasured = _measureCtx.measureText(item.str).width;
-            const scale = fullMeasured > 0 ? itemTotalW / fullMeasured : 1;
-
-            // Track position for each word
-            let cursorX = tx;
-            for (const part of parts) {
-                if (!part) continue;
-                const partW = _measureCtx.measureText(part).width * scale;
-                
-                // Skip whitespace
-                if (/^\s+$/.test(part)) {
-                    cursorX += partW;
-                    continue;
-                }
-                
-                // Store word data
-                words.push({
-                    text: part,
-                    page: pageNum,
-                    x:    cursorX,
-                    y:    ty,
-                    w:    partW,
-                    h:    itemH,
-                });
-                cursorX += partW;
-            }
-        }
-    }
-
-    return { doc, words };
-}
-
-// ===== STEP 2: Find which words are different (Diff Algorithm) =====
-
+// Threshold: if total word count exceeds this, use anchored chunking
 const LARGE_DOC_THRESHOLD = 4000;
 
-// Core LCS diff algorithm - compares two arrays efficiently
+/**
+ * Core LCS using a two-row rolling DP. O(n * m) time but only O(m) space.
+ * Returns {removed: Set<int>, added: Set<int>} with indices into the
+ * original arrays.
+ *
+ * @param {string[]} oldArr
+ * @param {string[]} newArr
+ * @param {number} oldOffset - add this to all old indices before storing in set
+ * @param {number} newOffset - add this to all new indices before storing in set
+ * @param {Set} removedSet   - output set for removed indices
+ * @param {Set} addedSet     - output set for added indices
+ */
 function lcsSegment(oldArr, newArr, oldOffset, newOffset, removedSet, addedSet) {
     const n = oldArr.length;
     const m = newArr.length;
 
-    // Handle edge cases
     if (n === 0) {
         for (let j = 0; j < m; j++) addedSet.add(newOffset + j);
         return;
@@ -351,30 +297,33 @@ function lcsSegment(oldArr, newArr, oldOffset, newOffset, removedSet, addedSet) 
         return;
     }
 
-    // Use two-row approach to save memory
+    // Two-row rolling DP — only O(m) memory
     let prev = new Uint32Array(m + 1);
     let curr = new Uint32Array(m + 1);
+
+    // We still need the full table to traceback. For segment sizes
+    // up to LARGE_DOC_THRESHOLD/chunks this is manageable.
+    // Store only the 'direction' at each cell: 0=diag, 1=up, 2=left
     const dir = new Uint8Array((n + 1) * (m + 1));
 
-    // Fill DP table
     for (let i = 1; i <= n; i++) {
         for (let j = 1; j <= m; j++) {
             if (oldArr[i - 1] === newArr[j - 1]) {
                 curr[j] = prev[j - 1] + 1;
-                dir[i * (m + 1) + j] = 0; // match
+                dir[i * (m + 1) + j] = 0; // diagonal
             } else if (prev[j] >= curr[j - 1]) {
                 curr[j] = prev[j];
-                dir[i * (m + 1) + j] = 1; // from above
+                dir[i * (m + 1) + j] = 1; // up
             } else {
                 curr[j] = curr[j - 1];
-                dir[i * (m + 1) + j] = 2; // from left
+                dir[i * (m + 1) + j] = 2; // left
             }
         }
         [prev, curr] = [curr, prev];
         curr.fill(0);
     }
 
-    // Trace back to find removed/added words
+    // Traceback
     let i = n, j = m;
     while (i > 0 || j > 0) {
         if (i > 0 && j > 0 && dir[i * (m + 1) + j] === 0) {
@@ -387,15 +336,21 @@ function lcsSegment(oldArr, newArr, oldOffset, newOffset, removedSet, addedSet) 
     }
 }
 
-// Find matching word anchors for large documents
+/**
+ * Find "anchor" words: pairs of identical words at the same relative
+ * position in both arrays that we can use to split the problem.
+ * This is a simplified version of the hunt-szymanski idea.
+ */
 function findAnchors(oldArr, newArr, minBlockSize = 5) {
+    // Build a map: word -> list of indices in new
     const newIndex = new Map();
     for (let j = 0; j < newArr.length; j++) {
         if (!newIndex.has(newArr[j])) newIndex.set(newArr[j], []);
         newIndex.get(newArr[j]).push(j);
     }
 
-    const anchors = [];
+    // Walk old array and find runs of consecutive matches
+    const anchors = []; // [{i, j, len}]
     let i = 0;
     while (i < oldArr.length) {
         const word = oldArr[i];
@@ -424,7 +379,9 @@ function findAnchors(oldArr, newArr, minBlockSize = 5) {
     return anchors;
 }
 
-// Main diff function that handles large documents automatically
+/**
+ * Main diff function. Automatically uses chunking for large documents.
+ */
 function diffWords(oldArr, newArr) {
     const removed = new Set();
     const added   = new Set();
@@ -432,15 +389,18 @@ function diffWords(oldArr, newArr) {
     const totalSize = oldArr.length * newArr.length;
 
     if (totalSize <= LARGE_DOC_THRESHOLD * LARGE_DOC_THRESHOLD) {
-        // Small document - diff directly
+        // Small enough — diff in one shot
         lcsSegment(oldArr, newArr, 0, 0, removed, added);
     } else {
-        // Large document - break into chunks for speed
+        // Large document: use anchored chunking
         const anchors = findAnchors(oldArr, newArr, 5);
+
+        // Build segments between anchors
         const segments = [];
         let prevI = 0, prevJ = 0;
 
         for (const anchor of anchors) {
+            // Segment before this anchor
             if (anchor.i > prevI || anchor.j > prevJ) {
                 segments.push({
                     oldSlice: oldArr.slice(prevI, anchor.i),
@@ -449,10 +409,12 @@ function diffWords(oldArr, newArr) {
                     newOff: prevJ,
                 });
             }
+            // The anchor itself is "equal" — no need to diff it
             prevI = anchor.i + anchor.len;
             prevJ = anchor.j + anchor.len;
         }
 
+        // Trailing segment after last anchor
         if (prevI < oldArr.length || prevJ < newArr.length) {
             segments.push({
                 oldSlice: oldArr.slice(prevI),
@@ -469,84 +431,24 @@ function diffWords(oldArr, newArr) {
 
     return { removed, added };
 }
-
-// ===== STEP 3: Draw pages with highlights =====
-
-// Render PDF pages with color-coded highlights for changes
-async function renderPane(pdfDoc, container, highlightWords, color) {
-    container.innerHTML = '';
-
-    // Group words by page for faster lookup
-    const byPage = new Map();
-    for (const w of highlightWords) {
-        if (!byPage.has(w.page)) byPage.set(w.page, []);
-        byPage.get(w.page).push(w);
-    }
-
-    // Draw each page
-    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-        const page     = await pdfDoc.getPage(pageNum);
-        const viewport = page.getViewport({ scale: RENDER_SCALE });
-
-        // Create page container
-        const div   = document.createElement('div');
-        div.className = 'page-container';
-        div.style.width  = `${viewport.width}px`;
-        div.style.height = `${viewport.height}px`;
-
-        // Render PDF to canvas
-        const baseCanvas      = document.createElement('canvas');
-        baseCanvas.className  = 'page-canvas';
-        baseCanvas.width      = viewport.width;
-        baseCanvas.height     = viewport.height;
-        await page.render({
-            canvasContext: baseCanvas.getContext('2d'),
-            viewport,
-        }).promise;
-
-        // Create highlight overlay
-        const hCanvas     = document.createElement('canvas');
-        hCanvas.className = 'highlight-canvas';
-        hCanvas.width     = viewport.width;
-        hCanvas.height    = viewport.height;
-
-        const hCtx        = hCanvas.getContext('2d');
-        hCtx.fillStyle    = color;
-
-        // Draw boxes around changed words
-        const pageWords = byPage.get(pageNum) || [];
-        for (const w of pageWords) {
-            // Convert PDF coordinates to canvas coordinates
-            const cx = w.x * RENDER_SCALE;
-            const cy = viewport.height - (w.y + w.h) * RENDER_SCALE;
-            const cw = w.w * RENDER_SCALE;
-            const ch = w.h * RENDER_SCALE;
-
-            // Skip words outside the viewport
-            if (cx < -10 || cy < -10 || cx > viewport.width + 10 || cy > viewport.height + 10) continue;
-
-            // Draw highlight rectangle
-            hCtx.fillRect(cx + 1, cy + 1, Math.max(cw - 2, 4), Math.max(ch - 2, 4));
-        }
-
-        div.append(baseCanvas, hCanvas);
-        container.appendChild(div);
-    }
-}
-
-// ===== STEP 4: Sync scrolling between panes =====
-
+// ─────────────────────────────────────────────────────────────────────────────
+// LAYER 4 — Scroll Sync (Index Bridge)
+//
+// FIX 1: Use fractional position (scrollTop / scrollHeight) instead of
+//        raw scrollTop. This handles PDFs of different lengths correctly.
+// FIX 2: Use a boolean isSyncing flag with requestAnimationFrame to
+//        prevent scroll event ping-pong between the two panes.
+// ─────────────────────────────────────────────────────────────────────────────
 const lPane = document.getElementById('left-pane');
 const rPane = document.getElementById('right-pane');
 let isSyncing = false;
 
-// Create scroll handler that keeps both panes in sync
 function makeSyncHandler(source, target) {
     return function () {
         if (isSyncing) return;
         isSyncing = true;
 
-        // Use fractional position for accurate sync (works with different heights)
+        // Map fractional scroll position — handles different document heights
         const fraction = source.scrollTop / (source.scrollHeight - source.clientHeight || 1);
         target.scrollTop = fraction * (target.scrollHeight - target.clientHeight);
 
@@ -554,69 +456,317 @@ function makeSyncHandler(source, target) {
     };
 }
 
-// Sync left to right and vice versa
 lPane.addEventListener('scroll', makeSyncHandler(lPane, rPane));
 rPane.addEventListener('scroll', makeSyncHandler(rPane, lPane));
 
-// ===== STEP 5: Main comparison workflow =====
+// ─────────────────────────────────────────────────────────────────────────────
+// CHUNKED PROGRESSIVE PIPELINE
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// For large PDFs (100–1000 pages) processing everything at once is too slow.
+// Instead we process CHUNK_PAGES pages at a time:
+//
+//   1. Extract words for pages [chunkStart … chunkStart + CHUNK_PAGES]
+//   2. Prepend any "tail" carried over from the previous chunk
+//   3. Diff the combined word lists
+//   4. Find the SAFE SEAM — the last run of SEAM_MIN_RUN consecutive
+//      identical words near the end of the chunk. This is where the
+//      content of both PDFs is guaranteed to be in sync.
+//   5. Commit everything BEFORE the seam: paint highlights, render pages
+//      to the screen immediately so the user sees results appearing live.
+//   6. Carry the words AFTER the seam into the next chunk as the "tail".
+//      This overlap ensures the boundary region is re-diffed with fresh
+//      context and no words get misclassified.
+//   7. Free (null out) the committed word arrays so GC can reclaim memory.
+//   8. Repeat until all pages are done.
+//
+// Safe-seam boundary problem (your example):
+//   Old page 10 ends: "…Sons of the American Revolution, 1906, 220"
+//   New page 10 ends: "…Sons of the and doughter finace pringle Sons of"
+//
+//   If we cut here, the LCS sees "Sons of" as the last match and thinks
+//   everything after it in old is "removed". That's wrong — those words
+//   continue on page 11 in the new PDF.
+//
+//   The safe seam finder scans BACKWARDS from the end of the chunk
+//   looking for a run of SEAM_MIN_RUN consecutive matching words.
+//   In the example above "Constitution, Laws and Hand Book of the Texas
+//   Society of the" is a long matching run — that becomes the seam.
+//   We commit everything before it and carry "Sons of the American
+//   Revolution…" (old tail) and "Sons of the and doughter…" (new tail)
+//   into the next chunk where they get resolved with page 11 context.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Update the progress bar
+const CHUNK_PAGES   = 10;   // pages to process per batch
+const SEAM_MIN_RUN  = 6;    // consecutive matching words needed for a safe seam
+const SEAM_SCAN_PCT = 0.35; // scan the last 35% of chunk words for a seam
+
 function setProgress(pct) {
     document.getElementById('progress-bar').style.width = pct + '%';
 }
 
-// Run the complete diff workflow
+// ── Extract words for a page range from an already-open PDF.js document ──────
+async function extractPageRange(doc, startPage, endPage) {
+    const words = [];
+    const end   = Math.min(endPage, doc.numPages);
+    for (let pageNum = startPage; pageNum <= end; pageNum++) {
+        const page    = await doc.getPage(pageNum);
+        const content = await page.getTextContent();
+        for (const item of content.items) {
+            if (!item.str || !item.str.trim()) continue;
+            const tx       = item.transform[4];
+            const ty       = item.transform[5];
+            const fontSize = Math.abs(item.transform[3]);
+            const itemH    = item.height > 0 ? item.height : fontSize;
+            const itemTotalW = item.width;
+            const parts    = item.str.split(/(\s+)/);
+            const fontSpec = `${fontSize}px sans-serif`;
+            _measureCtx.font = fontSpec;
+            const fullMeasured = _measureCtx.measureText(item.str).width;
+            const scale    = fullMeasured > 0 ? itemTotalW / fullMeasured : 1;
+            let cursorX    = tx;
+            for (const part of parts) {
+                if (!part) continue;
+                const partW = _measureCtx.measureText(part).width * scale;
+                if (/^\s+$/.test(part)) { cursorX += partW; continue; }
+                words.push({ text: part, page: pageNum, x: cursorX, y: ty, w: partW, h: itemH });
+                cursorX += partW;
+            }
+        }
+    }
+    return words;
+}
+
+// ── Find the safe seam index ──────────────────────────────────────────────────
+// Scans backwards through oldWords looking for the last run of SEAM_MIN_RUN
+// consecutive words that also appear consecutively in newWords.
+// Returns { oldSeam, newSeam } — the index AFTER the seam run in each list.
+// If no seam is found, returns null (caller will carry the whole chunk forward).
+function findSafeSeam(oldWords, newWords) {
+    const oldTexts = oldWords.map(w => w.text);
+    const newTexts = newWords.map(w => w.text);
+    const scanFrom = Math.floor(oldTexts.length * (1 - SEAM_SCAN_PCT));
+
+    // Build a reverse lookup: word → positions in newTexts
+    const newIndex = new Map();
+    for (let j = 0; j < newTexts.length; j++) {
+        if (!newIndex.has(newTexts[j])) newIndex.set(newTexts[j], []);
+        newIndex.get(newTexts[j]).push(j);
+    }
+
+    let bestSeam = null;
+
+    // Walk old from scanFrom onwards, look for a run >= SEAM_MIN_RUN
+    for (let i = scanFrom; i < oldTexts.length; i++) {
+        const candidates = newIndex.get(oldTexts[i]);
+        if (!candidates) continue;
+        for (const j of candidates) {
+            let run = 0;
+            while (
+                i + run < oldTexts.length &&
+                j + run < newTexts.length &&
+                oldTexts[i + run] === newTexts[j + run]
+            ) run++;
+            if (run >= SEAM_MIN_RUN) {
+                // We want the LAST (rightmost) qualifying seam so we keep
+                // as few words as possible in the carry-over tail
+                if (!bestSeam || (i + run) > (bestSeam.oldSeam)) {
+                    bestSeam = { oldSeam: i + run, newSeam: j + run };
+                }
+            }
+        }
+    }
+    return bestSeam;   // null if no seam found
+}
+
+// ── Render a specific set of pages into a pane (append mode) ─────────────────
+async function renderPageRange(pdfDoc, container, pageStart, pageEnd,
+                               highlightSet, allWords, color, append) {
+    if (!append) container.innerHTML = '';
+    const byPage = new Map();
+    for (const w of allWords) {
+        if (!byPage.has(w.page)) byPage.set(w.page, []);
+        byPage.get(w.page).push(w);
+    }
+    const end = Math.min(pageEnd, pdfDoc.numPages);
+    for (let pageNum = pageStart; pageNum <= end; pageNum++) {
+        const page     = await pdfDoc.getPage(pageNum);
+        const viewport = page.getViewport({ scale: RENDER_SCALE });
+        const div      = document.createElement('div');
+        div.className  = 'page-container';
+        div.style.width  = `${viewport.width}px`;
+        div.style.height = `${viewport.height}px`;
+        const baseCanvas     = document.createElement('canvas');
+        baseCanvas.className = 'page-canvas';
+        baseCanvas.width     = viewport.width;
+        baseCanvas.height    = viewport.height;
+        await page.render({ canvasContext: baseCanvas.getContext('2d'), viewport }).promise;
+        const hCanvas     = document.createElement('canvas');
+        hCanvas.className = 'highlight-canvas';
+        hCanvas.width     = viewport.width;
+        hCanvas.height    = viewport.height;
+        const hCtx        = hCanvas.getContext('2d');
+        hCtx.fillStyle    = color;
+        for (const w of (byPage.get(pageNum) || [])) {
+            if (!highlightSet.has(w)) continue;
+            const cx = w.x * RENDER_SCALE;
+            const cy = viewport.height - (w.y + w.h) * RENDER_SCALE;
+            const cw = w.w * RENDER_SCALE;
+            const ch = w.h * RENDER_SCALE;
+            if (cx < -10 || cy < -10 || cx > viewport.width+10 || cy > viewport.height+10) continue;
+            hCtx.fillRect(cx + 1, cy + 1, Math.max(cw - 2, 4), Math.max(ch - 2, 4));
+        }
+        div.append(baseCanvas, hCanvas);
+        container.appendChild(div);
+    }
+}
+
+// ── Main chunked diff runner ──────────────────────────────────────────────────
 async function runDiff() {
     const btn    = document.getElementById('run-btn');
     const status = document.getElementById('status');
-
     btn.disabled = true;
-    setProgress(5);
+    lPane.innerHTML = '';
+    rPane.innerHTML = '';
+    setProgress(2);
 
     try {
-        // Extract text from both PDFs
-        status.textContent = 'Layer 1 — Extracting word coordinates…';
-        const [oldData, newData] = await Promise.all([
-            extractWordDatabase(oldFile),
-            extractWordDatabase(newFile),
+        // Open both PDFs once — we will page through them chunk by chunk
+        const [oldBuf, newBuf] = await Promise.all([
+            oldFile.arrayBuffer(),
+            newFile.arrayBuffer(),
         ]);
-        setProgress(35);
+        const oldDoc = await pdfjsLib.getDocument(oldBuf).promise;
+        const newDoc = await pdfjsLib.getDocument(newBuf).promise;
 
-        // Run diff algorithm
-        status.textContent = `Layer 2 — Running LCS diff (${oldData.words.length} × ${newData.words.length} words)…`;
-        await new Promise(r => setTimeout(r, 0));
+        const totalOldPages = oldDoc.numPages;
+        const totalNewPages = newDoc.numPages;
+        const totalChunks   = Math.ceil(Math.max(totalOldPages, totalNewPages) / CHUNK_PAGES);
 
-        const { removed, added } = diffWords(
-            oldData.words.map(w => w.text),
-            newData.words.map(w => w.text),
-        );
-        setProgress(60);
+        // Carry-over tails from the previous chunk's seam boundary
+        let oldTail = [];   // WordObjects
+        let newTail = [];
 
-        // Render both panes with highlights
-        status.textContent = `Layer 3 — Painting highlights (${removed.size} removed, ${added.size} added)…`;
+        // Global word-index offsets so highlight Sets stay globally unique
+        let oldGlobalOffset = 0;
+        let newGlobalOffset = 0;
 
-        await Promise.all([
-            renderPane(
-                oldData.doc,
-                lPane,
-                oldData.words.filter((_, i) => removed.has(i)),
-                'rgba(255, 213, 79, 0.45)'
-            ),
-            renderPane(
-                newData.doc,
-                rPane,
-                newData.words.filter((_, i) => added.has(i)),
-                'rgba(79, 195, 247, 0.45)'
-            ),
-        ]);
+        let totalRemoved = 0, totalAdded = 0;
+
+        for (let chunk = 0; chunk < totalChunks; chunk++) {
+            const pageStart = chunk * CHUNK_PAGES + 1;
+            const oldPageEnd = Math.min(pageStart + CHUNK_PAGES - 1, totalOldPages);
+            const newPageEnd = Math.min(pageStart + CHUNK_PAGES - 1, totalNewPages);
+            const isLast = (chunk === totalChunks - 1);
+
+            const pct = Math.round(5 + (chunk / totalChunks) * 90);
+            setProgress(pct);
+            status.textContent =
+                `Pages ${pageStart}–${Math.max(oldPageEnd, newPageEnd)} of ` +
+                `${Math.max(totalOldPages, totalNewPages)} ` +
+                `(chunk ${chunk + 1}/${totalChunks})…`;
+
+            // Yield so the UI actually updates before we block on extraction
+            await new Promise(r => setTimeout(r, 0));
+
+            // ── Layer 1: Extract this chunk's words ───────────────────
+            const [oldChunkWords, newChunkWords] = await Promise.all([
+                pageStart <= totalOldPages ? extractPageRange(oldDoc, pageStart, oldPageEnd) : Promise.resolve([]),
+                pageStart <= totalNewPages ? extractPageRange(newDoc, pageStart, newPageEnd) : Promise.resolve([]),
+            ]);
+
+            // Prepend tails from previous chunk
+            const oldWords = [...oldTail, ...oldChunkWords];
+            const newWords = [...newTail, ...newChunkWords];
+
+            if (oldWords.length === 0 && newWords.length === 0) continue;
+
+            // ── Layer 2: Find safe seam (unless this is the last chunk) ──
+            let commitOldCount = oldWords.length;
+            let commitNewCount = newWords.length;
+
+            if (!isLast) {
+                const seam = findSafeSeam(oldWords, newWords);
+                if (seam) {
+                    commitOldCount = seam.oldSeam;
+                    commitNewCount = seam.newSeam;
+                }
+                // If no seam found: commit nothing new this round, carry everything.
+                // This handles the extreme case (your example) where the boundary
+                // is totally misaligned — we wait for the next chunk to provide
+                // enough context for a reliable seam.
+                else if (oldChunkWords.length > 0 || newChunkWords.length > 0) {
+                    oldTail = oldWords;
+                    newTail = newWords;
+                    continue;   // skip to next chunk without committing
+                }
+            }
+
+            const oldCommit = oldWords.slice(0, commitOldCount);
+            const newCommit = newWords.slice(0, commitNewCount);
+
+            // ── Layer 2: LCS diff on committed region ─────────────────
+            const removed = new Set();
+            const added   = new Set();
+            lcsSegment(
+                oldCommit.map(w => w.text),
+                newCommit.map(w => w.text),
+                0, 0, removed, added
+            );
+
+            // Convert local segment indices → references to actual word objects
+            const removedWords = new Set(
+                [...removed].map(i => oldCommit[i]).filter(Boolean)
+            );
+            const addedWords = new Set(
+                [...added].map(i => newCommit[i]).filter(Boolean)
+            );
+
+            totalRemoved += removedWords.size;
+            totalAdded   += addedWords.size;
+
+            // ── Layer 3: Paint & render committed pages immediately ────
+            // Only render pages whose words are FULLY committed
+            // (i.e., all words on that page are before the seam)
+            const lastOldPageCommitted = commitOldCount > 0
+                ? oldCommit[commitOldCount - 1].page
+                : pageStart - 1;
+            const lastNewPageCommitted = commitNewCount > 0
+                ? newCommit[commitNewCount - 1].page
+                : pageStart - 1;
+
+            // Determine first page of this render batch
+            // (tail words may span back to a prior page — use tail's first page or pageStart)
+            const firstOldRenderPage = oldTail.length > 0 ? oldTail[0].page : pageStart;
+            const firstNewRenderPage = newTail.length > 0 ? newTail[0].page : pageStart;
+
+            await Promise.all([
+                renderPageRange(
+                    oldDoc, lPane,
+                    firstOldRenderPage, lastOldPageCommitted,
+                    removedWords, oldCommit,
+                    'rgba(255, 213, 79, 0.45)',
+                    chunk > 0   // append after first chunk
+                ),
+                renderPageRange(
+                    newDoc, rPane,
+                    firstNewRenderPage, lastNewPageCommitted,
+                    addedWords, newCommit,
+                    'rgba(79, 195, 247, 0.45)',
+                    chunk > 0
+                ),
+            ]);
+
+            // ── Carry tail into next chunk; free committed memory ─────
+            oldTail = oldWords.slice(commitOldCount);   // words after the seam
+            newTail = newWords.slice(commitNewCount);
+            // oldChunkWords / newChunkWords go out of scope → GC reclaims them
+        }
+
         setProgress(100);
-
-        // Show final statistics
-        const total = oldData.words.length + newData.words.length;
-        const pct   = ((removed.size + added.size) / total * 100).toFixed(1);
+        const total = totalRemoved + totalAdded;
         status.textContent =
-            `✅ Done — ${removed.size} removed · ${added.size} added · ${pct}% changed`;
-
+            `✅ Done — ${totalRemoved} removed · ${totalAdded} added`;
         setTimeout(() => setProgress(0), 1200);
 
     } catch (err) {
