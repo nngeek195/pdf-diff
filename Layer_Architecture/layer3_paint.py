@@ -1,245 +1,188 @@
 """
-Layer 3 — Direct Injection 
-Takes the target index sets from Layer 2 and paints highlights
-directly onto copies of the original PDFs.
+Layer 3 — Direct Injection (The Painter)
+==========================================
+Paints highlights directly onto PDF pages using exact bounding boxes
+from the word database.
 
-  OLD PDF  →  Light Yellow highlights on removed words  →  old_marked.pdf
-  NEW PDF  →  Light Blue   highlights on added words    →  new_marked.pdf
+  OLD PDF  →  Yellow highlights on removed words
+  NEW PDF  →  Blue   highlights on added words
 
-Strategy:
-  - Render each page to a high-res image using pypdfium2
-  - Draw colored rectangles over the bounding boxes from our word database
-  - Re-assemble the annotated images back into a PDF using Pillow/reportlab
+Key design for chunked streaming
+---------------------------------
+paint_page_range_to_images() — renders pages to PIL Image objects and
+returns them directly. The pipeline queues these images for the UI to
+display, and also appends them to the output PDF.
 
-We render to images rather than trying to inject annotation objects into
-the PDF stream because annotation support across PDF libraries is fragile
-and coordinate-system transforms are error-prone. Image rendering gives us
-pixel-perfect results that match exactly what the user sees.
+This avoids the previous approach of writing a shared output PDF file
+that both the background thread (writing) and main thread (reading)
+accessed simultaneously — which caused race conditions and required
+re-reading the entire accumulated PDF on every chunk.
 """
 
-import io
 import os
 from pathlib import Path
-from typing import Literal
 
-import pdfplumber
 import pypdfium2 as pdfium
 from PIL import Image, ImageDraw
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch
-from reportlab.pdfgen import canvas as rl_canvas
 
 from layer1_extraction import WordObject, get_page_dimensions
 
 
 # ── Highlight colors (RGBA) ───────────────────────────────────────────────────
-COLOR_REMOVED = (255, 235,  59, 120)   # Yellow — removed from OLD
-COLOR_ADDED   = ( 66, 165, 245, 120)   # Blue   — added in NEW
+COLOR_REMOVED = (255, 235,  59, 130)   # Yellow — removed from OLD
+COLOR_ADDED   = ( 66, 165, 245, 130)   # Blue   — added in NEW
+
+RENDER_SCALE  = 2.0
 
 
-# ── Render scale: 2× gives sharp text without huge file sizes ─────────────────
-RENDER_SCALE = 2.0
+# ── Internal: paint one page ─────────────────────────────────────────────────
 
-
-def _group_by_page(
-    word_db: list[WordObject],
-    target_indices: set[int],
-) -> dict[int, list[WordObject]]:
+def _paint_page(pdfium_page, highlight_words: list, color: tuple) -> Image.Image:
     """
-    Filter the word database to only target words and group them by page.
-    Returns {page_number: [WordObject, ...]}
+    Render one pdfium page to a PIL Image and draw highlight rectangles.
+    pdfplumber coords (top-left origin) match pypdfium2 render orientation.
     """
-    grouped: dict[int, list[WordObject]] = {}
-    for word in word_db:
-        if word.index in target_indices:
-            grouped.setdefault(word.page_number, []).append(word)
-    return grouped
-
-
-def _paint_page(
-    pdfium_page,
-    highlight_words: list[WordObject],
-    color: tuple,
-    page_height_pts: float,
-) -> Image.Image:
-    """
-    Render one PDF page to a PIL image, then draw highlight rectangles
-    over the specified words.
-
-    pdfplumber uses a top-left origin (y increases downward).
-    pypdfium2 renders with the same orientation.
-    So we can map pdfplumber bbox coords → pixel coords directly.
-    """
-    # Render the page to a bitmap at RENDER_SCALE
     bitmap = pdfium_page.render(scale=RENDER_SCALE)
-    img = bitmap.to_pil().convert("RGBA")
-    img_width, img_height = img.size
+    img    = bitmap.to_pil().convert("RGBA")
+    iw, ih = img.size
 
-    # Create a transparent overlay for highlights
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    # pdfplumber's coordinate origin is top-left, y increases downward.
-    # pypdfium2 renders top-left origin too at this scale.
-    # Scale factor: pixels per PDF point
-    pts_width  = img_width  / RENDER_SCALE
-    pts_height = img_height / RENDER_SCALE
-
-    scale_x = img_width  / pts_width
-    scale_y = img_height / pts_height
+    draw    = ImageDraw.Draw(overlay)
 
     for word in highlight_words:
-        # pdfplumber: x0, top(=y0), x1, bottom(=y1) — top-left origin
-        px0 = int(word.bbox.x0 * scale_x)
-        py0 = int(word.bbox.y0 * scale_y)
-        px1 = int(word.bbox.x1 * scale_x)
-        py1 = int(word.bbox.y1 * scale_y)
-
-        # Add a small padding so the highlight is slightly larger than the text
+        px0 = int(word.bbox.x0 * RENDER_SCALE)
+        py0 = int(word.bbox.y0 * RENDER_SCALE)
+        px1 = int(word.bbox.x1 * RENDER_SCALE)
+        py1 = int(word.bbox.y1 * RENDER_SCALE)
         pad = max(1, int(1.5 * RENDER_SCALE))
-        px0 = max(0, px0 - pad)
-        py0 = max(0, py0 - pad)
-        px1 = min(img_width,  px1 + pad)
-        py1 = min(img_height, py1 + pad)
+        draw.rectangle([
+            max(0, px0-pad), max(0, py0-pad),
+            min(iw, px1+pad), min(ih, py1+pad)
+        ], fill=color)
 
-        draw.rectangle([px0, py0, px1, py1], fill=color)
-
-    # Composite overlay onto the page image
-    img = Image.alpha_composite(img, overlay)
-    return img.convert("RGB")
+    return Image.alpha_composite(img, overlay).convert("RGB")
 
 
-def paint_pdf(
-    original_pdf_path: str,
-    word_db: list[WordObject],
-    target_indices: set[int],
-    output_path: str,
-    highlight_color: tuple,
-    label: str = "",
-) -> str:
+# ── Chunked painting: returns images AND saves to PDF ────────────────────────
+
+def paint_page_range_to_images(
+    pdf_path:        str,
+    word_db:         list,          # WordObjects for this chunk
+    highlight_words: set,           # WordObject instances to highlight
+    color:           tuple,
+    page_start:      int,
+    page_end:        int,
+) -> list:
     """
-    Open the original PDF, draw highlights on the relevant pages,
-    and write a new PDF to output_path.
+    Render pages [page_start … page_end], draw highlights, and return
+    a list of (page_number, PIL.Image) tuples.
 
-    Parameters
-    ----------
-    original_pdf_path : path to the source PDF
-    word_db           : word database for this PDF (from Layer 1)
-    target_indices    : set of word indices to highlight
-    output_path       : where to write the annotated PDF
-    highlight_color   : RGBA tuple for the highlight rectangles
-    label             : "OLD" or "NEW" for logging
-
-    Returns
-    -------
-    str : output_path
+    Returns images directly — the caller decides what to do with them
+    (display in UI and/or save to disk). No shared file I/O here.
     """
-    print(f"  [{label}] Painting {len(target_indices)} highlights → {output_path}")
+    # Group highlight words by page
+    by_page: dict[int, list] = {}
+    for w in word_db:
+        if w in highlight_words:
+            by_page.setdefault(w.page_number, []).append(w)
 
-    highlight_map = _group_by_page(word_db, target_indices)
-    page_dims     = get_page_dimensions(original_pdf_path)
-    num_pages     = len(page_dims)
+    pdf_doc     = pdfium.PdfDocument(pdf_path)
+    total_pages = len(pdf_doc)
+    end         = min(page_end, total_pages)
 
-    pdf_doc = pdfium.PdfDocument(original_pdf_path)
-
-    page_images: list[Image.Image] = []
-
-    for page_num in range(1, num_pages + 1):
-        pdfium_page  = pdf_doc[page_num - 1]
-        page_h_pts   = page_dims[page_num][1]
-        words_on_page = highlight_map.get(page_num, [])
-
-        img = _paint_page(pdfium_page, words_on_page, highlight_color, page_h_pts)
-        page_images.append(img)
+    result = []
+    for page_num in range(page_start, end + 1):
+        pdfium_page   = pdf_doc[page_num - 1]
+        words_on_page = by_page.get(page_num, [])
+        img           = _paint_page(pdfium_page, words_on_page, color)
+        result.append((page_num, img))
         pdfium_page.close()
 
     pdf_doc.close()
+    return result
 
-    # Save all pages as a multi-page PDF via Pillow
+
+def save_images_to_pdf(
+    page_images: list,   # list of (page_num, PIL.Image)
+    output_path: str,
+    append:      bool = False,
+) -> None:
+    """
+    Save (or append) a list of PIL Images to a PDF file.
+    If append=True and the file exists, new images are appended after
+    the existing pages using a safe read-then-write approach.
+    """
+    if not page_images:
+        return
+
+    imgs = [img for _, img in page_images]
+
+    if append and Path(output_path).exists():
+        # Read existing pages first, then write all together
+        existing_doc  = pdfium.PdfDocument(output_path)
+        existing_imgs = []
+        for ep in existing_doc:
+            bm = ep.render(scale=RENDER_SCALE)
+            existing_imgs.append(bm.to_pil().convert("RGB"))
+            ep.close()
+        existing_doc.close()
+        imgs = existing_imgs + imgs
+
+    first, rest = imgs[0], imgs[1:]
+    first.save(
+        output_path,
+        save_all=True,
+        append_images=rest,
+        format="PDF",
+        resolution=72 * RENDER_SCALE,
+    )
+
+
+# ── Full painting (small docs / testing) ─────────────────────────────────────
+
+def paint_pdf(
+    original_pdf_path: str,
+    word_db:           list,
+    target_indices:    set,
+    output_path:       str,
+    highlight_color:   tuple,
+    label:             str = "",
+) -> str:
+    print(f"  [{label}] Painting {len(target_indices)} highlights → {output_path}")
+    highlight_words = {w for w in word_db if w.index in target_indices}
+    page_dims   = get_page_dimensions(original_pdf_path)
+    num_pages   = len(page_dims)
+    by_page: dict[int, list] = {}
+    for w in highlight_words:
+        by_page.setdefault(w.page_number, []).append(w)
+    pdf_doc = pdfium.PdfDocument(original_pdf_path)
+    page_images = []
+    for page_num in range(1, num_pages + 1):
+        pdfium_page   = pdf_doc[page_num - 1]
+        words_on_page = by_page.get(page_num, [])
+        img           = _paint_page(pdfium_page, words_on_page, highlight_color)
+        page_images.append(img)
+        pdfium_page.close()
+    pdf_doc.close()
     if page_images:
-        first = page_images[0]
-        rest  = page_images[1:]
-        first.save(
-            output_path,
-            save_all=True,
-            append_images=rest,
-            format="PDF",
-            resolution=72 * RENDER_SCALE,
-        )
-
+        first, rest = page_images[0], page_images[1:]
+        first.save(output_path, save_all=True, append_images=rest,
+                   format="PDF", resolution=72 * RENDER_SCALE)
     return output_path
 
 
 def paint_both(
-    old_pdf_path:     str,
-    new_pdf_path:     str,
-    old_db:           list[WordObject],
-    new_db:           list[WordObject],
-    removed_indices:  set[int],
-    added_indices:    set[int],
-    output_dir:       str = ".",
-) -> tuple[str, str]:
-    """
-    Convenience wrapper: paint OLD and NEW PDFs and return both output paths.
-
-    Returns
-    -------
-    (old_marked_path, new_marked_path)
-    """
+    old_pdf_path:    str,
+    new_pdf_path:    str,
+    old_db:          list,
+    new_db:          list,
+    removed_indices: set,
+    added_indices:   set,
+    output_dir:      str = ".",
+) -> tuple:
     os.makedirs(output_dir, exist_ok=True)
-
     old_out = str(Path(output_dir) / "old_marked.pdf")
     new_out = str(Path(output_dir) / "new_marked.pdf")
-
-    paint_pdf(
-        original_pdf_path=old_pdf_path,
-        word_db=old_db,
-        target_indices=removed_indices,
-        output_path=old_out,
-        highlight_color=COLOR_REMOVED,
-        label="OLD",
-    )
-
-    paint_pdf(
-        original_pdf_path=new_pdf_path,
-        word_db=new_db,
-        target_indices=added_indices,
-        output_path=new_out,
-        highlight_color=COLOR_ADDED,
-        label="NEW",
-    )
-
+    paint_pdf(old_pdf_path, old_db, removed_indices, old_out, COLOR_REMOVED, "OLD")
+    paint_pdf(new_pdf_path, new_db, added_indices,   new_out, COLOR_ADDED,   "NEW")
     return old_out, new_out
-
-
-if __name__ == "__main__":
-    import sys
-    from layer1_extraction import extract_word_database
-    from layer2_diff import compute_diff
-
-    if len(sys.argv) < 3:
-        print("Usage: python layer3_paint.py <old.pdf> <new.pdf> [output_dir]")
-        sys.exit(1)
-
-    old_path = sys.argv[1]
-    new_path = sys.argv[2]
-    out_dir  = sys.argv[3] if len(sys.argv) > 3 else "."
-
-    print("Extracting word databases…")
-    old_db = extract_word_database(old_path)
-    new_db = extract_word_database(new_path)
-
-    print("Computing diff…")
-    result = compute_diff(old_db, new_db)
-    print(result.summary())
-
-    print("Painting highlights…")
-    old_out, new_out = paint_both(
-        old_path, new_path,
-        old_db, new_db,
-        result.removed_indices,
-        result.added_indices,
-        out_dir,
-    )
-
-    print(f"\nDone!\n  OLD → {old_out}\n  NEW → {new_out}")
