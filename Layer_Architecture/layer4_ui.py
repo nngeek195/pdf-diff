@@ -1,518 +1,436 @@
 """
-Layer 4 — Synchronized Dual-Pane Viewer  (Zero-Latency Architecture)
-======================================================================
+Layer 4 — Synchronized Dual-Pane Viewer
+=========================================
+UI is identical to the working script.
+Internal structure uses clean 4-layer imports.
 
-THE REAL REASON previous versions still felt like "wait until done"
---------------------------------------------------------------------
-Every previous fix used after(N, _poll) with N >= 16ms.
+THREADING
+----------
+Single background thread runs the chunked pipeline.
+pdfium.PdfDocument opened once per PDF, kept alive for entire run.
+No parallel rendering (avoids pypdfium2 thread-safety issues).
 
-Background thread renders page in ~50-200ms, calls q.put() instantly.
-But main thread is asleep in after() and won't wake for another 0-50ms.
-On a fast machine with small PDFs, bg renders ALL pages before the
-first poll fires. User sees: nothing... nothing... ALL pages at once.
-
-JS HAS NO POLL INTERVAL
-------------------------
-JS `await` fires the continuation THE INSTANT the promise resolves.
-Zero scheduler latency. The browser repaints between each page because
-the microtask queue drains before the next render frame.
-
-THE FIX: event_generate instead of after()
-------------------------------------------
-bg thread calls root.event_generate('<<PageReady>>', when='tail')
-after every single q.put(). This wakes Tkinter IMMEDIATELY — typically
-within 1ms — not on a 16-50ms timer.
-
-_on_page_ready() draws ONE page and returns. Tkinter repaints.
-Next <<PageReady>> arrives ~render-time later and draws the next page.
-
-This is structurally identical to JS:
-  render page → await (browser repaints) → render next page
-  render page → event_generate (Tkinter repaints) → render next page
+SCROLL SYNC
+------------
+Fractional sync: yview()[0] fraction mirrors JS scrollTop/scrollHeight.
+rAF-style debounce via after(0) prevents ping-pong.
 """
 
-import io
+import math
 import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 from pathlib import Path
 
-from PIL import Image, ImageTk, ImageDraw
 import pypdfium2 as pdfium
+from PIL import ImageTk
 
-from layer1_extraction import extract_page_range, get_page_count, WordObject
-from layer2_diff        import find_safe_seam, diff_segment
-from layer3_paint       import COLOR_REMOVED, COLOR_ADDED
+from layer1_extraction import extract_page_range, get_page_count
+from layer2_diff        import find_safe_seam, diff_words
+from layer3_paint       import render_page_range, REMOVED_COLOR, ADDED_COLOR, RENDER_SCALE
 
-CHUNK_PAGES   = 10
-DISPLAY_WIDTH = 560
-RENDER_SCALE  = 2.0
+# ── Constants ─────────────────────────────────────────────────────────────────
+CHUNK_PAGES = 10
 
-BG          = "#0D1117"
-SURFACE     = "#161B22"
-SURFACE2    = "#21262D"
-BORDER      = "#30363D"
-TEXT        = "#E6EDF3"
-SUBTEXT     = "#8B949E"
-ACCENT      = "#58A6FF"
-REMOVED_COL = "#E3B341"
-ADDED_COL   = "#58A6FF"
-PANE_BG     = "#010409"
+# ── Theme ─────────────────────────────────────────────────────────────────────
+BG       = "#0D1117"
+SURFACE  = "#161B22"
+SURFACE2 = "#21262D"
+BORDER   = "#30363D"
+TEXT     = "#E6EDF3"
+SUBTEXT  = "#8B949E"
+ACCENT   = "#58A6FF"
 
 
-# ── Messages ──────────────────────────────────────────────────────────────────
+# ── Background pipeline ───────────────────────────────────────────────────────
 
-class MsgProgress:
-    def __init__(self, text, pct):
-        self.text = text
-        self.pct  = pct
-
-class MsgPage:
-    def __init__(self, side, jpeg_bytes, height, removed_count, added_count):
-        self.side          = side
-        self.jpeg_bytes    = jpeg_bytes
-        self.height        = height
-        self.removed_count = removed_count
-        self.added_count   = added_count
-
-class MsgDone:
-    def __init__(self, removed, added, unchanged, old_pages, new_pages):
-        self.removed   = removed
-        self.added     = added
-        self.unchanged = unchanged
-        self.old_pages = old_pages
-        self.new_pages = new_pages
-
-class MsgError:
-    def __init__(self, text):
-        self.text = text
-
-
-# ── Page renderer ─────────────────────────────────────────────────────────────
-
-def _render_page_to_jpeg(pdf_path, page_num, highlight_words, color):
-    doc    = pdfium.PdfDocument(pdf_path)
-    page   = doc[page_num - 1]
-    bitmap = page.render(scale=RENDER_SCALE)
-    img    = bitmap.to_pil().convert("RGBA")
-    iw, ih = img.size
-
-    if highlight_words:
-        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        draw    = ImageDraw.Draw(overlay)
-        for word in highlight_words:
-            px0 = int(word.bbox.x0 * RENDER_SCALE)
-            py0 = int(word.bbox.y0 * RENDER_SCALE)
-            px1 = int(word.bbox.x1 * RENDER_SCALE)
-            py1 = int(word.bbox.y1 * RENDER_SCALE)
-            pad = max(1, int(1.5 * RENDER_SCALE))
-            draw.rectangle([
-                max(0, px0 - pad), max(0, py0 - pad),
-                min(iw, px1 + pad), min(ih, py1 + pad)
-            ], fill=color)
-        img = Image.alpha_composite(img, overlay)
-
-    img = img.convert("RGB")
-    dh  = int(ih * DISPLAY_WIDTH / iw)
-    img = img.resize((DISPLAY_WIDTH, dh), Image.BILINEAR)
-    page.close()
-    doc.close()
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=88)
-    return buf.getvalue(), dh
-
-
-# ── Pipeline ──────────────────────────────────────────────────────────────────
-
-def pipeline(old_path, new_path, q, notify_fn):
+def pipeline(old_path: str, new_path: str,
+             q: queue.Queue, notify_fn) -> None:
     """
-    notify_fn() is called after every q.put().
-    It calls event_generate on the root window — wakes Tkinter instantly.
-    """
-    def put(msg):
-        q.put(msg)
-        notify_fn()
+    Chunked diff pipeline running on a background thread.
 
+    For each chunk:
+      1. Extract words (Layer 1 — pdfplumber, 0-based pages)
+      2. Find safe seam + commit (Layer 2)
+      3. Diff committed words (Layer 2)
+      4. Render committed pages with highlights (Layer 3 — pdfium)
+      5. Post each rendered page image to the queue
+    """
+    old_doc = new_doc = None
     try:
-        old_total    = get_page_count(old_path)
-        new_total    = get_page_count(new_path)
-        max_pages    = max(old_total, new_total)
-        total_chunks = (max_pages + CHUNK_PAGES - 1) // CHUNK_PAGES
+        # Open pdfium docs once — kept open for whole run (single thread, safe)
+        old_doc = pdfium.PdfDocument(old_path)
+        new_doc = pdfium.PdfDocument(new_path)
 
-        old_tail = []
-        new_tail = []
-        old_off = new_off = 0
-        total_removed = total_added = total_unchanged = 0
+        total_old = len(old_doc)
+        total_new = len(new_doc)
+        total_chunks = math.ceil(max(total_old, total_new) / CHUNK_PAGES)
+
+        old_tail: list[dict] = []
+        new_tail: list[dict] = []
+        total_removed = total_added = 0
 
         for chunk in range(total_chunks):
-            p_start = chunk * CHUNK_PAGES + 1
-            old_end = min(p_start + CHUNK_PAGES - 1, old_total)
-            new_end = min(p_start + CHUNK_PAGES - 1, new_total)
-            is_last = (chunk == total_chunks - 1)
+            # 0-based page range for this chunk
+            page_start   = chunk * CHUNK_PAGES
+            old_page_end = min(page_start + CHUNK_PAGES - 1, total_old - 1)
+            new_page_end = min(page_start + CHUNK_PAGES - 1, total_new - 1)
+            is_last      = (chunk == total_chunks - 1)
 
-            pct = int(5 + chunk / total_chunks * 88)
-            put(MsgProgress(
-                f"Pages {p_start}-{max(old_end,new_end)} of {max_pages} "
-                f"(chunk {chunk+1}/{total_chunks})", pct))
+            pct = int(5 + (chunk / total_chunks) * 90)
+            q.put(('progress', pct));       notify_fn()
+            q.put(('status',
+                   f"Pages {page_start+1}–{max(old_page_end, new_page_end)+1} "
+                   f"of {max(total_old, total_new)}  "
+                   f"(chunk {chunk+1}/{total_chunks})")); notify_fn()
 
-            old_chunk = extract_page_range(old_path, p_start, old_end, old_off) \
-                        if p_start <= old_total else []
-            new_chunk = extract_page_range(new_path, p_start, new_end, new_off) \
-                        if p_start <= new_total else []
-            old_off += len(old_chunk)
-            new_off += len(new_chunk)
+            # ── Layer 1: Extract ──────────────────────────────────────
+            old_chunk = extract_page_range(old_path, page_start, old_page_end) \
+                        if page_start <= total_old - 1 else []
+            new_chunk = extract_page_range(new_path, page_start, new_page_end) \
+                        if page_start <= total_new - 1 else []
 
             old_words = old_tail + old_chunk
             new_words = new_tail + new_chunk
+
             if not old_words and not new_words:
                 continue
 
+            # ── Layer 2a: Safe seam ───────────────────────────────────
+            commit_old = len(old_words)
+            commit_new = len(new_words)
+
             if not is_last:
                 seam = find_safe_seam(old_words, new_words)
-                if not seam.found:
+                if seam:
+                    commit_old = seam['old_seam']
+                    commit_new = seam['new_seam']
+                elif old_chunk or new_chunk:
+                    # No seam found — carry entire chunk forward
                     old_tail, new_tail = old_words, new_words
                     continue
-                old_commit = old_words[:seam.old_seam]
-                new_commit = new_words[:seam.new_seam]
-                old_tail   = old_words[seam.old_seam:]
-                new_tail   = new_words[seam.new_seam:]
-            else:
-                old_commit, new_commit = old_words, new_words
-                old_tail = new_tail = []
+
+            old_commit = old_words[:commit_old]
+            new_commit = new_words[:commit_new]
 
             if not old_commit and not new_commit:
                 continue
 
-            seg = diff_segment(old_commit, new_commit)
-            total_removed   += len(seg.removed_words)
-            total_added     += len(seg.added_words)
-            total_unchanged += seg.unchanged
+            # ── Layer 2b: Diff ────────────────────────────────────────
+            removed_words, added_words = diff_words(old_commit, new_commit)
+            total_removed += len(removed_words)
+            total_added   += len(added_words)
 
-            old_by_page = {}
-            for w in old_commit:
-                if w in seg.removed_words:
-                    old_by_page.setdefault(w.page_number, []).append(w)
+            # ── Layer 3: Render committed pages ───────────────────────
+            last_old_page = old_commit[-1]['page'] if old_commit else page_start - 1
+            last_new_page = new_commit[-1]['page'] if new_commit else page_start - 1
 
-            new_by_page = {}
-            for w in new_commit:
-                if w in seg.added_words:
-                    new_by_page.setdefault(w.page_number, []).append(w)
+            first_old_render = old_tail[0]['page'] if old_tail else page_start
+            first_new_render = new_tail[0]['page'] if new_tail else page_start
 
-            old_pages = list(range(old_commit[0].page_number,
-                                   old_commit[-1].page_number + 1)) if old_commit else []
-            new_pages = list(range(new_commit[0].page_number,
-                                   new_commit[-1].page_number + 1)) if new_commit else []
+            for _p, img in render_page_range(
+                    old_doc, first_old_render, last_old_page,
+                    removed_words, REMOVED_COLOR):
+                q.put(('page_old', img)); notify_fn()
 
-            # ── ONE PAGE AT A TIME, notify after each ─────────────────
-            # After put(), notify_fn() fires event_generate immediately.
-            # Main thread draws this page and returns to event loop.
-            # Tkinter repaints. Then we render the next page.
-            # Structurally identical to JS's await-per-page loop.
-            for i in range(max(len(old_pages), len(new_pages))):
-                if i < len(old_pages):
-                    pg = old_pages[i]
-                    if pg <= old_total:
-                        jpeg, h = _render_page_to_jpeg(
-                            old_path, pg, old_by_page.get(pg, []), COLOR_REMOVED)
-                        put(MsgPage('old', jpeg, h,
-                                    len(seg.removed_words), len(seg.added_words)))
+            for _p, img in render_page_range(
+                    new_doc, first_new_render, last_new_page,
+                    added_words, ADDED_COLOR):
+                q.put(('page_new', img)); notify_fn()
 
-                if i < len(new_pages):
-                    pg = new_pages[i]
-                    if pg <= new_total:
-                        jpeg, h = _render_page_to_jpeg(
-                            new_path, pg, new_by_page.get(pg, []), COLOR_ADDED)
-                        put(MsgPage('new', jpeg, h,
-                                    len(seg.removed_words), len(seg.added_words)))
+            # ── Carry tails ───────────────────────────────────────────
+            old_tail = old_words[commit_old:]
+            new_tail = new_words[commit_new:]
 
-            del old_commit, new_commit, old_chunk, new_chunk
-
-        put(MsgDone(total_removed, total_added, total_unchanged,
-                    old_total, new_total))
+        q.put(('done', f"Done  —  {total_removed} removed · {total_added} added"))
+        notify_fn()
 
     except Exception as exc:
         import traceback; traceback.print_exc()
-        put(MsgError(str(exc)))
-
-
-# ── PDFPane ───────────────────────────────────────────────────────────────────
-
-class PDFPane(tk.Frame):
-    def __init__(self, master, label, label_color, **kw):
-        super().__init__(master, bg=BG, **kw)
-        self._imgs    = []
-        self._next_y  = 12
-        self._GAP     = 10
-        self._count   = 0
-        self._sync_cb = None
-
-        hdr = tk.Frame(self, bg=SURFACE2, height=30)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text=f"  {label}", bg=SURFACE2, fg=label_color,
-                 font=("Courier", 10, "bold")).pack(side="left", padx=8)
-        self._lbl = tk.Label(hdr, text="", bg=SURFACE2, fg=SUBTEXT,
-                             font=("Helvetica", 9))
-        self._lbl.pack(side="right", padx=10)
-
-        wrap = tk.Frame(self, bg=PANE_BG)
-        wrap.pack(fill="both", expand=True)
-
-        self._sb = tk.Scrollbar(wrap, orient="vertical", bg=SURFACE2,
-                                troughcolor=SURFACE2, activebackground=ACCENT)
-        self._sb.pack(side="right", fill="y")
-
-        self._cv = tk.Canvas(wrap, bg=PANE_BG, highlightthickness=0,
-                             yscrollcommand=self._on_scroll)
-        self._cv.pack(side="left", fill="both", expand=True)
-        self._sb.config(command=self._cv.yview)
-        self._cv.bind("<MouseWheel>", self._wheel)
-        self._cv.bind("<Button-4>",   self._wheel)
-        self._cv.bind("<Button-5>",   self._wheel)
-
-    def clear(self):
-        self._cv.delete("all")
-        self._imgs.clear()
-        self._next_y = 12
-        self._count  = 0
-        self._cv.config(scrollregion=(0, 0, DISPLAY_WIDTH, 1))
-        self._lbl.config(text="")
-
-    def append_page(self, jpeg_bytes, height):
-        img   = Image.open(io.BytesIO(jpeg_bytes))
-        photo = ImageTk.PhotoImage(img)
-        self._imgs.append(photo)
-        self._cv.create_image(0, self._next_y, anchor="nw", image=photo)
-
-        # Save the current scroll position in PIXELS before we grow the canvas.
-        # Tkinter normally preserves scroll *fraction* when scrollregion changes,
-        # which shifts existing pages as the total height grows. Saving and
-        # restoring the pixel offset keeps already-visible pages rock-steady.
-        old_total  = max(self._next_y, 1)
-        top_frac   = self._cv.yview()[0]
-        top_pixels = top_frac * old_total          # where the viewport top is now
-
-        self._next_y += height + self._GAP
-        self._count  += 1
-        self._cv.config(scrollregion=(0, 0, DISPLAY_WIDTH, self._next_y))
-
-        # Restore exact pixel position so nothing moves
-        self._cv.yview_moveto(top_pixels / self._next_y)
-        self._lbl.config(text=f"{self._count} pages")
-
-    def _on_scroll(self, lo, hi):
-        self._sb.set(lo, hi)
-        if self._sync_cb:
-            # Pass absolute pixel offset — fractions shift during loading
-            top_pixels = float(lo) * self._next_y
-            self._sync_cb(top_pixels)
-
-    def _wheel(self, e):
-        self._cv.yview_scroll(-2 if (e.num == 4 or e.delta > 0) else 2, "units")
-
-    def set_sync(self, cb):  self._sync_cb = cb
-
-    def goto_pixels(self, px):
-        """Scroll to absolute pixel offset. Stable regardless of canvas height."""
-        if self._next_y > 0:
-            self._cv.yview_moveto(px / self._next_y)
+        q.put(('error', str(exc))); notify_fn()
+    finally:
+        if old_doc: old_doc.close()
+        if new_doc: new_doc.close()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
+
     def __init__(self):
         super().__init__()
         self.title("PDF Diff")
-        self.geometry("1200x820")
-        self.minsize(800, 500)
+        self.geometry("1300x850")
         self.configure(bg=BG)
 
-        self._old_path = None
-        self._new_path = None
-        self._queue    = None
-        self._syncing  = False
-        self._removed  = 0
-        self._added    = 0
-        self._draining = False
+        self.old_file    = None
+        self.new_file    = None
+        self.q           = queue.Queue()
+        self.is_syncing  = False
 
-        # Virtual event — bg thread fires this to wake Tkinter with zero latency
-        self.bind('<<PageReady>>', self._on_page_ready)
-        self._build()
+        # Image references (prevent GC)
+        self.old_photos: list = []
+        self.new_photos: list = []
+        self.old_y = 28
+        self.new_y = 28
 
-    def _notify(self):
-        """Thread-safe. Wakes Tkinter event loop immediately."""
-        self.event_generate('<<PageReady>>', when='tail')
+        self._build_ui()
+        self._poll_queue()
 
-    def _on_page_ready(self, _=None):
-        """
-        Draw ONE page and return so Tkinter can repaint.
-        Re-entrant calls are blocked by _draining flag.
+    # ── UI construction ───────────────────────────────────────────────────────
 
-        This is the Python equivalent of JS's await continuation:
-        fires instantly when a page is ready, draws it, returns.
-        """
-        if self._draining:
-            return
-        self._draining = True
+    def _build_ui(self):
+        # Progress bar
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure("TProgressbar", thickness=3,
+                        background=ACCENT, troughcolor=BG, borderwidth=0)
+        self.progress = ttk.Progressbar(self, style="TProgressbar",
+                                         orient="horizontal", mode="determinate")
+        self.progress.pack(fill=tk.X, side=tk.TOP)
 
-        try:
-            msg = self._queue.get_nowait()
-        except queue.Empty:
-            self._draining = False
-            return
-
-        if isinstance(msg, MsgProgress):
-            self._status.set(msg.text)
-            self._prog_var.set(msg.pct)
-            self._draining = False
-            self._on_page_ready()   # progress is cheap, get next message
-
-        elif isinstance(msg, MsgPage):
-            pane = self._left if msg.side == 'old' else self._right
-            pane.append_page(msg.jpeg_bytes, msg.height)
-            if msg.side == 'old':
-                self._removed = msg.removed_count
-            else:
-                self._added = msg.added_count
-            self._stats.set(f"-{self._removed}  +{self._added}")
-            # STOP HERE — return to event loop so Tkinter repaints
-            self._draining = False
-
-        elif isinstance(msg, MsgDone):
-            self._prog.pack_forget()
-            self._prog_var.set(0)
-            self._run_btn.config(state="normal")
-            self._status.set("Done  scroll either pane to sync both.")
-            self._stats.set(
-                f"Old: {msg.old_pages}p  New: {msg.new_pages}p    "
-                f"-{msg.removed}  +{msg.added}  ={msg.unchanged}")
-            self._draining = False
-
-        elif isinstance(msg, MsgError):
-            self._prog.pack_forget()
-            self._run_btn.config(state="normal")
-            self._status.set(f"Error: {msg.text}")
-            self._draining = False
-
-    def _build(self):
-        bar = tk.Frame(self, bg=SURFACE, height=50)
-        bar.pack(fill="x")
+        # Top bar
+        bar = tk.Frame(self, bg=SURFACE, height=56,
+                       highlightbackground=BORDER, highlightthickness=1)
+        bar.pack(fill=tk.X, side=tk.TOP)
         bar.pack_propagate(False)
 
-        tk.Label(bar, text="  PDF DIFF", bg=SURFACE, fg=TEXT,
-                 font=("Courier", 13, "bold")).pack(side="left", pady=12)
+        tk.Label(bar, text="⬛ PDF DIFF",
+                 font=("Courier New", 14, "bold"),
+                 bg=SURFACE, fg=TEXT).pack(side=tk.LEFT, padx=(20, 10), pady=15)
 
-        b = dict(bg=SURFACE2, fg=SUBTEXT, relief="flat", font=("Helvetica", 9),
-                 cursor="hand2", activebackground=BORDER, activeforeground=TEXT,
-                 padx=10, pady=3)
+        btn_kw = dict(bg=SURFACE2, fg="#C9D1D9", font=("Arial", 10),
+                      relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+                      highlightbackground=BORDER, highlightthickness=1,
+                      activebackground=BORDER)
 
-        self._old_btn = tk.Button(bar, text="Old PDF", **b,
-                                  command=lambda: self._pick("old"))
-        self._old_btn.pack(side="left", padx=(18, 4), pady=10)
+        self.btn_old = tk.Button(bar, text="📂 Old PDF", **btn_kw,
+                                  command=self._pick_old)
+        self.btn_old.pack(side=tk.LEFT, padx=5, pady=10)
 
-        self._new_btn = tk.Button(bar, text="New PDF", **b,
-                                  command=lambda: self._pick("new"))
-        self._new_btn.pack(side="left", padx=4, pady=10)
+        self.btn_new = tk.Button(bar, text="📂 New PDF", **btn_kw,
+                                  command=self._pick_new)
+        self.btn_new.pack(side=tk.LEFT, padx=5, pady=10)
 
-        self._run_btn = tk.Button(
-            bar, text="Compare",
-            bg=ACCENT, fg="#0D1117", relief="flat",
-            font=("Helvetica", 10, "bold"), cursor="hand2",
-            activebackground="#79B8FF", padx=14, pady=3,
-            command=self._run, state="disabled")
-        self._run_btn.pack(side="left", padx=(10, 0), pady=10)
+        self.btn_run = tk.Button(bar, text="▶ Compare",
+                                  bg="#238636", fg="white",
+                                  font=("Arial", 10, "bold"),
+                                  relief=tk.FLAT, padx=18, pady=6,
+                                  cursor="hand2", state=tk.DISABLED,
+                                  activebackground="#2ea043",
+                                  activeforeground="white",
+                                  command=self._run)
+        self.btn_run.pack(side=tk.LEFT, padx=10, pady=10)
 
-        self._status = tk.StringVar(value="Select both PDF files to begin.")
-        tk.Label(bar, textvariable=self._status,
-                 bg=SURFACE, fg=SUBTEXT, font=("Helvetica", 9)
-                 ).pack(side="left", padx=14)
+        # Legend
+        leg = tk.Frame(bar, bg=SURFACE)
+        leg.pack(side=tk.LEFT, padx=20, pady=15)
+        tk.Label(leg, text="", bg="#FFD54F", width=2, height=1).pack(side=tk.LEFT)
+        tk.Label(leg, text="Removed", bg=SURFACE, fg=SUBTEXT,
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 15))
+        tk.Label(leg, text="", bg="#4FC3F7", width=2, height=1).pack(side=tk.LEFT)
+        tk.Label(leg, text="Added", bg=SURFACE, fg=SUBTEXT,
+                 font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 0))
 
-        self._stats = tk.StringVar(value="")
-        tk.Label(bar, textvariable=self._stats,
-                 bg=SURFACE, fg=SUBTEXT, font=("Helvetica", 9)
-                 ).pack(side="right", padx=14)
+        self.lbl_status = tk.Label(bar, text="Select both PDFs to begin.",
+                                    bg=SURFACE, fg=SUBTEXT, font=("Arial", 10))
+        self.lbl_status.pack(side=tk.RIGHT, padx=20)
 
-        self._prog_var = tk.DoubleVar(value=0)
-        self._prog = ttk.Progressbar(self, variable=self._prog_var, maximum=100)
-        s = ttk.Style(self)
-        s.theme_use("default")
-        s.configure("TProgressbar", troughcolor=SURFACE2, background=ACCENT, thickness=3)
+        # Dual pane
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
 
-        body = tk.Frame(self, bg=BORDER)
-        body.pack(fill="both", expand=True)
+        # Left pane
+        left_col = tk.Frame(body, bg=BG)
+        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lh = tk.Frame(left_col, bg=SURFACE2, height=30,
+                      highlightbackground=BORDER, highlightthickness=1)
+        lh.pack(fill=tk.X)
+        lh.pack_propagate(False)
+        tk.Label(lh, text="OLD VERSION", bg=SURFACE2, fg="#E3B341",
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=14, pady=5)
 
-        self._left  = PDFPane(body, "OLD VERSION", REMOVED_COL)
-        self._left.pack(side="left", fill="both", expand=True)
-        tk.Frame(body, bg=BORDER, width=2).pack(side="left", fill="y")
-        self._right = PDFPane(body, "NEW VERSION", ADDED_COL)
-        self._right.pack(side="right", fill="both", expand=True)
+        self.canvas_old = tk.Canvas(left_col, bg="#010409", highlightthickness=0)
+        self.sb_old = tk.Scrollbar(left_col, orient=tk.VERTICAL,
+                                    command=self.canvas_old.yview)
+        self.canvas_old.configure(yscrollcommand=self._lscroll)
+        self.sb_old.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_old.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self._left.set_sync(self._lsync)
-        self._right.set_sync(self._rsync)
+        # Right pane
+        right_col = tk.Frame(body, bg=BG,
+                              highlightbackground=BORDER, highlightthickness=1)
+        right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rh = tk.Frame(right_col, bg=SURFACE2, height=30,
+                      highlightbackground=BORDER, highlightthickness=1)
+        rh.pack(fill=tk.X)
+        rh.pack_propagate(False)
+        tk.Label(rh, text="NEW VERSION", bg=SURFACE2, fg=ACCENT,
+                 font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=14, pady=5)
 
-        leg = tk.Frame(self, bg=SURFACE2, height=28)
-        leg.pack(fill="x", side="bottom")
-        leg.pack_propagate(False)
-        for col, lbl in [(REMOVED_COL, "Removed"), (ADDED_COL, "Added")]:
-            row = tk.Frame(leg, bg=SURFACE2)
-            row.pack(side="left", padx=14, pady=6)
-            tk.Label(row, text="  ", bg=col, width=2).pack(side="left", padx=(0, 5))
-            tk.Label(row, text=lbl, bg=SURFACE2, fg=TEXT,
-                     font=("Helvetica", 9)).pack(side="left")
-        tk.Label(leg, text="Event-driven: pages appear instantly as rendered",
-                 bg=SURFACE2, fg=SUBTEXT, font=("Helvetica", 8)
-                 ).pack(side="right", padx=14)
+        self.canvas_new = tk.Canvas(right_col, bg="#010409", highlightthickness=0)
+        self.sb_new = tk.Scrollbar(right_col, orient=tk.VERTICAL,
+                                    command=self.canvas_new.yview)
+        self.canvas_new.configure(yscrollcommand=self._rscroll)
+        self.sb_new.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas_new.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    def _pick(self, side):
-        p = filedialog.askopenfilename(
-            title=f"Select {'Old' if side=='old' else 'New'} PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
-        if not p:
-            return
-        name  = Path(p).name
-        short = name[:20] + "..." if len(name) > 20 else name
-        if side == "old":
-            self._old_path = p
-            self._old_btn.config(text=short, fg=REMOVED_COL)
+        # Mousewheel binding
+        for cv in (self.canvas_old, self.canvas_new):
+            cv.bind("<MouseWheel>", self._wheel)
+            cv.bind("<Button-4>",   self._wheel)
+            cv.bind("<Button-5>",   self._wheel)
+
+    # ── Scroll sync (fractional, rAF-style debounce) ─────────────────────────
+
+    def _lscroll(self, lo, hi):
+        self.sb_old.set(lo, hi)
+        if not self.is_syncing:
+            self.is_syncing = True
+            self.canvas_new.yview_moveto(float(lo))
+            self.after(0, self._clear_sync)
+
+    def _rscroll(self, lo, hi):
+        self.sb_new.set(lo, hi)
+        if not self.is_syncing:
+            self.is_syncing = True
+            self.canvas_old.yview_moveto(float(lo))
+            self.after(0, self._clear_sync)
+
+    def _clear_sync(self):
+        self.is_syncing = False
+
+    def _wheel(self, event):
+        if self.is_syncing:
+            return "break"
+        self.is_syncing = True
+
+        if   event.num == 4: delta = -1
+        elif event.num == 5: delta =  1
         else:
-            self._new_path = p
-            self._new_btn.config(text=short, fg=ADDED_COL)
-        if self._old_path and self._new_path:
-            self._run_btn.config(state="normal")
-            self._status.set("Ready  click Compare.")
+            delta = int(-1 * (event.delta / 120))
+            if delta == 0:
+                delta = -1 if event.delta > 0 else 1
+
+        self.canvas_old.yview_scroll(delta, "units")
+        self.canvas_new.yview_scroll(delta, "units")
+        # Sync fractions after scroll
+        lo, _ = self.canvas_old.yview()
+        self.canvas_new.yview_moveto(lo)
+
+        self.after(0, self._clear_sync)
+        return "break"
+
+    # ── File picking ──────────────────────────────────────────────────────────
+
+    def _pick_old(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if not p: return
+        self.old_file = p
+        name = Path(p).name
+        short = name[:19] + "…" if len(name) > 22 else name
+        self.btn_old.config(text=f"📄 {short}", fg=ACCENT,
+                             highlightbackground=ACCENT)
+        self._check_ready()
+
+    def _pick_new(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")])
+        if not p: return
+        self.new_file = p
+        name = Path(p).name
+        short = name[:19] + "…" if len(name) > 22 else name
+        self.btn_new.config(text=f"📄 {short}", fg=ACCENT,
+                             highlightbackground=ACCENT)
+        self._check_ready()
+
+    def _check_ready(self):
+        if self.old_file and self.new_file:
+            self.btn_run.config(state=tk.NORMAL)
+            self.lbl_status.config(text="Ready — click ▶ Compare.")
+
+    # ── Run ───────────────────────────────────────────────────────────────────
 
     def _run(self):
-        self._run_btn.config(state="disabled")
-        self._left.clear()
-        self._right.clear()
-        self._stats.set("")
-        self._removed = 0
-        self._added   = 0
-        self._prog.pack(fill="x")
-        self._prog_var.set(0)
+        self.btn_run.config(state=tk.DISABLED)
+        self.canvas_old.delete("all")
+        self.canvas_new.delete("all")
+        self.old_photos.clear()
+        self.new_photos.clear()
+        self.old_y = 28
+        self.new_y = 28
+        self.progress['value'] = 2
+        self.update_idletasks()
 
-        self._queue = queue.Queue()
+        self.q = queue.Queue()
         threading.Thread(
             target=pipeline,
-            args=(self._old_path, self._new_path, self._queue, self._notify),
-            daemon=True
+            args=(self.old_file, self.new_file, self.q, self._notify),
+            daemon=True,
         ).start()
 
-    def _lsync(self, px):
-        if self._syncing: return
-        self._syncing = True
-        self._right.goto_pixels(px)
-        self._syncing = False
+    def _notify(self):
+        """Called from background thread — wake Tkinter event loop."""
+        self.event_generate('<<PipelineUpdate>>', when='tail')
 
-    def _rsync(self, px):
-        if self._syncing: return
-        self._syncing = True
-        self._left.goto_pixels(px)
-        self._syncing = False
+    # ── Queue drain ───────────────────────────────────────────────────────────
+
+    def _poll_queue(self):
+        """Drain the queue on a 50ms timer (fallback for missed events)."""
+        self._drain()
+        self.after(50, self._poll_queue)
+
+    def _drain(self):
+        try:
+            while True:
+                msg_type, data = self.q.get_nowait()
+                self._handle(msg_type, data)
+        except queue.Empty:
+            pass
+
+    def _handle(self, msg_type: str, data):
+        if msg_type == 'status':
+            self.lbl_status.config(text=data)
+
+        elif msg_type == 'progress':
+            self.progress['value'] = data
+
+        elif msg_type in ('page_old', 'page_new'):
+            is_old  = (msg_type == 'page_old')
+            canvas  = self.canvas_old if is_old else self.canvas_new
+            photos  = self.old_photos  if is_old else self.new_photos
+            cur_y   = self.old_y       if is_old else self.new_y
+
+            photo = ImageTk.PhotoImage(data)
+            photos.append(photo)
+
+            cx = canvas.winfo_width() // 2
+            # Drop shadow / border rect
+            canvas.create_rectangle(
+                cx - data.width // 2 - 1, cur_y - 1,
+                cx + data.width // 2 + 1, cur_y + data.height + 1,
+                outline=BORDER, fill=BORDER)
+            canvas.create_image(cx, cur_y, image=photo, anchor="n")
+
+            new_y = cur_y + data.height + 28
+            if is_old: self.old_y = new_y
+            else:      self.new_y = new_y
+
+            canvas.config(scrollregion=canvas.bbox("all"))
+
+        elif msg_type == 'done':
+            self.lbl_status.config(text=data)
+            self.btn_run.config(state=tk.NORMAL)
+            self.progress['value'] = 100
+            self.after(2000, lambda: self.progress.configure(value=0))
+
+        elif msg_type == 'error':
+            self.lbl_status.config(text=f"Error: {data}")
+            self.btn_run.config(state=tk.NORMAL)
+            self.progress['value'] = 0
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     App().mainloop()
