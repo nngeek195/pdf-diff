@@ -5,7 +5,6 @@ import queue
 import os
 import difflib
 import math
-import bisect
 import traceback
 
 import pdfplumber
@@ -29,13 +28,6 @@ RENDER_SCALE  = 1.5
 CHUNK_PAGES   = 10
 SEAM_MIN_RUN  = 6
 SEAM_SCAN_PCT = 0.35
-
-# Smooth scroll config
-SCROLL_INTERVAL = 12      # ms between animation frames
-SCROLL_EASING   = 0.78    # velocity decay per frame (ease-out)
-SCROLL_SPEED    = 0.06    # fraction of page height moved per wheel click
-
-# Page gap between pages in pixels (canvas coords)
 PAGE_GAP = 28
 
 
@@ -55,25 +47,14 @@ class PDFDiffApp:
         self.old_y = PAGE_GAP
         self.new_y = PAGE_GAP
 
-        self.is_syncing = False
-
-        # ── Page-aligned sync tables ──────────────────────────────────────
-        self._old_page_tops: list[float] = []
-        self._new_page_tops: list[float] = []
-
-        self._old_canvas_h: float = 1.0
-        self._new_canvas_h: float = 1.0
-
-        # Smooth scroll velocity (in canvas-y pixels/frame)
-        self._vel_old: float = 0.0
-        self._vel_new: float = 0.0
-        self._scroll_after = None
+        # This tracks the custom alignment pixel difference between the two canvases
+        self.sync_offset_y = 0.0
 
         self.setup_ui()
         self.process_queue()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # UI SETUP
+    # UI SETUP WITH 3 SCROLLBARS
     # ─────────────────────────────────────────────────────────────────────────
 
     def setup_ui(self):
@@ -90,199 +71,122 @@ class PDFDiffApp:
         top_bar.pack(fill=tk.X, side=tk.TOP)
         top_bar.pack_propagate(False)
 
-        tk.Label(top_bar, text="⬛ PDF DIFF",
-                 font=("Courier New", 14, "bold"),
+        tk.Label(top_bar, text="⬛ PDF DIFF", font=("Courier New", 14, "bold"),
                  bg=SURFACE, fg=TEXT).pack(side=tk.LEFT, padx=(20, 10), pady=15)
 
-        self.btn_old = tk.Button(top_bar, text="📂 Old PDF",
-                                  bg=SURFACE2, fg="#C9D1D9", font=("Arial", 10),
-                                  relief=tk.FLAT, command=self.select_old,
-                                  padx=14, pady=6, cursor="hand2",
-                                  highlightbackground=BORDER, highlightthickness=1,
-                                  activebackground=BORDER)
+        self.btn_old = tk.Button(top_bar, text="📂 Old PDF", bg=SURFACE2, fg="#C9D1D9", font=("Arial", 10),
+                                  relief=tk.FLAT, command=self.select_old, padx=14, pady=6, cursor="hand2",
+                                  highlightbackground=BORDER, highlightthickness=1, activebackground=BORDER)
         self.btn_old.pack(side=tk.LEFT, padx=5, pady=10)
 
-        self.btn_new = tk.Button(top_bar, text="📂 New PDF",
-                                  bg=SURFACE2, fg="#C9D1D9", font=("Arial", 10),
-                                  relief=tk.FLAT, command=self.select_new,
-                                  padx=14, pady=6, cursor="hand2",
-                                  highlightbackground=BORDER, highlightthickness=1,
-                                  activebackground=BORDER)
+        self.btn_new = tk.Button(top_bar, text="📂 New PDF", bg=SURFACE2, fg="#C9D1D9", font=("Arial", 10),
+                                  relief=tk.FLAT, command=self.select_new, padx=14, pady=6, cursor="hand2",
+                                  highlightbackground=BORDER, highlightthickness=1, activebackground=BORDER)
         self.btn_new.pack(side=tk.LEFT, padx=5, pady=10)
 
-        self.btn_run = tk.Button(top_bar, text="▶ Compare",
-                                  bg="#238636", fg="white",
-                                  font=("Arial", 10, "bold"),
-                                  relief=tk.FLAT, command=self.run_diff,
-                                  padx=18, pady=6, cursor="hand2",
-                                  state=tk.DISABLED,
-                                  activebackground="#2ea043",
-                                  activeforeground="white")
+        self.btn_run = tk.Button(top_bar, text="▶ Compare", bg="#238636", fg="white", font=("Arial", 10, "bold"),
+                                  relief=tk.FLAT, command=self.run_diff, padx=18, pady=6, cursor="hand2",
+                                  state=tk.DISABLED, activebackground="#2ea043", activeforeground="white")
         self.btn_run.pack(side=tk.LEFT, padx=10, pady=10)
 
-        legend_frame = tk.Frame(top_bar, bg=SURFACE)
-        legend_frame.pack(side=tk.LEFT, padx=20, pady=15)
-        tk.Label(legend_frame, text="", bg="#FFD54F",
-                 width=2, height=1).pack(side=tk.LEFT)
-        tk.Label(legend_frame, text="Removed", bg=SURFACE,
-                 fg=SUBTEXT, font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 15))
-        tk.Label(legend_frame, text="", bg="#4FC3F7",
-                 width=2, height=1).pack(side=tk.LEFT)
-        tk.Label(legend_frame, text="Added", bg=SURFACE,
-                 fg=SUBTEXT, font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 0))
-
-        self.lbl_status = tk.Label(top_bar,
-                                    text="Select both PDFs to begin.",
-                                    bg=SURFACE, fg=SUBTEXT, font=("Arial", 10),
-                                    cursor="hand2")
+        self.lbl_status = tk.Label(top_bar, text="Select both PDFs to begin.", bg=SURFACE, fg=SUBTEXT, font=("Arial", 10))
         self.lbl_status.pack(side=tk.RIGHT, padx=20, pady=15)
-        self.lbl_status.bind("<Button-1>", self._copy_status)
-        self._full_status_text = ""
 
+        # ── Pane Wrapper ──
         pane_wrapper = tk.Frame(self.root, bg=BG)
         pane_wrapper.pack(fill=tk.BOTH, expand=True)
 
-        # Left pane
+        # 1. Left Independent Scrollbar
+        self.sb_old = ttk.Scrollbar(pane_wrapper, orient="vertical", command=self._scroll_old_indep)
+        self.sb_old.pack(side=tk.LEFT, fill=tk.Y)
+
+        # 2. Old PDF Canvas
         left_col = tk.Frame(pane_wrapper, bg=BG)
         left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        left_header = tk.Frame(left_col, bg=SURFACE2, height=30,
-                                highlightbackground=BORDER, highlightthickness=1)
+        left_header = tk.Frame(left_col, bg=SURFACE2, height=30, highlightbackground=BORDER, highlightthickness=1)
         left_header.pack(fill=tk.X)
         left_header.pack_propagate(False)
-        tk.Label(left_header, text="OLD VERSION", bg=SURFACE2,
-                 fg="#E3B341", font=("Arial", 9, "bold")).pack(
-                 side=tk.LEFT, padx=14, pady=5)
-        self.canvas_old = tk.Canvas(left_col, bg="#010409", highlightthickness=0)
+        tk.Label(left_header, text="OLD VERSION", bg=SURFACE2, fg="#E3B341", font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=14, pady=5)
+        
+        self.canvas_old = tk.Canvas(left_col, bg="#010409", highlightthickness=0, yscrollcommand=self._update_sbs_old)
         self.canvas_old.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Right pane
-        right_col = tk.Frame(pane_wrapper, bg=BG,
-                              highlightbackground=BORDER, highlightthickness=1)
+        # 3. Center Synchronized Scrollbar
+        self.sb_center = ttk.Scrollbar(pane_wrapper, orient="vertical", command=self._scroll_sync)
+        self.sb_center.pack(side=tk.LEFT, fill=tk.Y)
+
+        # 4. Right Independent Scrollbar (Packed right side first to bracket the canvas)
+        self.sb_new = ttk.Scrollbar(pane_wrapper, orient="vertical", command=self._scroll_new_indep)
+        self.sb_new.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 5. New PDF Canvas
+        right_col = tk.Frame(pane_wrapper, bg=BG, highlightbackground=BORDER, highlightthickness=1)
         right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        right_header = tk.Frame(right_col, bg=SURFACE2, height=30,
-                                 highlightbackground=BORDER, highlightthickness=1)
+        right_header = tk.Frame(right_col, bg=SURFACE2, height=30, highlightbackground=BORDER, highlightthickness=1)
         right_header.pack(fill=tk.X)
         right_header.pack_propagate(False)
-        tk.Label(right_header, text="NEW VERSION", bg=SURFACE2,
-                 fg=ACCENT, font=("Arial", 9, "bold")).pack(
-                 side=tk.LEFT, padx=14, pady=5)
-        self.canvas_new = tk.Canvas(right_col, bg="#010409", highlightthickness=0)
+        tk.Label(right_header, text="NEW VERSION", bg=SURFACE2, fg=ACCENT, font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=14, pady=5)
+        
+        self.canvas_new = tk.Canvas(right_col, bg="#010409", highlightthickness=0, yscrollcommand=self.sb_new.set)
         self.canvas_new.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # Bind Mousewheel to Sync Scrolling
         for canvas in (self.canvas_old, self.canvas_new):
             canvas.bind("<MouseWheel>", self.on_mousewheel)
             canvas.bind("<Button-4>",   self.on_mousewheel)
             canvas.bind("<Button-5>",   self.on_mousewheel)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # FILE SELECTION + VALIDATION
+    # 3-WAY SCROLLBAR & OFFSET LOGIC
     # ─────────────────────────────────────────────────────────────────────────
 
-    def select_old(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if not path: return
-        err = self._validate_pdf(path)
-        if err:
-            self._set_status(f"Old PDF: {err}", error=True)
-            return
-        self.old_file = path
-        name = os.path.basename(path)
-        self.btn_old.config(
-            text=f"📄 {name[:19] + '…' if len(name) > 22 else name}",
-            fg=ACCENT, highlightbackground=ACCENT)
-        self.check_ready()
+    def _update_offset(self):
+        """Calculates the current alignment offset between the two canvases."""
+        old_y = float(self.canvas_old.canvasy(0))
+        new_y = float(self.canvas_new.canvasy(0))
+        self.sync_offset_y = new_y - old_y
 
-    def select_new(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if not path: return
-        err = self._validate_pdf(path)
-        if err:
-            self._set_status(f"New PDF: {err}", error=True)
-            return
-        self.new_file = path
-        name = os.path.basename(path)
-        self.btn_new.config(
-            text=f"📄 {name[:19] + '…' if len(name) > 22 else name}",
-            fg=ACCENT, highlightbackground=ACCENT)
-        self.check_ready()
+    def _update_sbs_old(self, first, last):
+        """Updates both the Left scrollbar and the Center scrollbar UI states."""
+        self.sb_old.set(first, last)
+        self.sb_center.set(first, last)
 
-    def _validate_pdf(self, path):
-        if not os.path.exists(path): return "File not found."
-        if os.path.getsize(path) == 0: return "File is empty."
-        try:
-            with open(path, 'rb') as f:
-                if f.read(5) != b'%PDF-': return "Not a valid PDF file."
-        except OSError as e:
-            return f"Cannot read file: {e}"
-        return None
+    def _scroll_old_indep(self, *args):
+        """Left Scrollbar: Scrolls OLD only, creates new offset."""
+        self.canvas_old.yview(*args)
+        self._update_offset()
 
-    def check_ready(self):
-        if self.old_file and self.new_file:
-            self.btn_run.config(state=tk.NORMAL)
-            self._set_status("Ready — click ▶ Compare.")
+    def _scroll_new_indep(self, *args):
+        """Right Scrollbar: Scrolls NEW only, creates new offset."""
+        self.canvas_new.yview(*args)
+        self._update_offset()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # STATUS BAR
-    # ─────────────────────────────────────────────────────────────────────────
+    def _scroll_sync(self, *args):
+        """Center Scrollbar: Scrolls BOTH, locking in the custom offset."""
+        self.canvas_old.yview(*args)
+        target_new_y = float(self.canvas_old.canvasy(0)) + self.sync_offset_y
+        self._scroll_canvas_to_y(self.canvas_new, target_new_y)
 
-    def _set_status(self, msg, error=False, warn=False):
-        self._full_status_text = msg
-        color = ERROR_COLOR if error else (WARN_COLOR if warn else SUBTEXT)
-        display = msg if len(msg) <= 90 else msg[:87] + "…"
-        self.lbl_status.config(text=display, fg=color)
+    def on_mousewheel(self, event):
+        """Mousewheel: Scrolls BOTH, locking in the custom offset."""
+        if event.num == 4: raw_delta = -1
+        elif event.num == 5: raw_delta = 1
+        else: raw_delta = int(-1 * (event.delta / 120))
 
-    def _copy_status(self, _event=None):
-        if self._full_status_text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(self._full_status_text)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # PAGE-ALIGNED SCROLL SYNC
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _get_page_at_y(self, page_tops: list, canvas_y: float) -> int:
-        """Binary search: which page index is visible at canvas_y."""
-        if not page_tops: return 0
-        idx = bisect.bisect_right(page_tops, canvas_y) - 1
-        return max(0, idx)
-
-    def _get_y_for_page(self, page_tops: list, page_idx: int) -> float:
-        """Canvas-y of the top of page_idx. Clamps to last page if out of range."""
-        if not page_tops: return 0.0
-        page_idx = min(page_idx, len(page_tops) - 1)
-        return page_tops[page_idx]
-
-    def _map_y_to_target(self, driving_tops, target_tops, driving_y, target_is_new):
-        """
-        Maps an absolute Y coordinate from the driving canvas to the target canvas, 
-        preserving exact pixel offsets within the page. Handles empty/ghost pages.
-        """
-        if not driving_tops:
-            return driving_y
-            
-        page_idx = self._get_page_at_y(driving_tops, driving_y)
-        offset_y = driving_y - driving_tops[page_idx]
-        
-        if not target_tops:
-            return driving_y
-            
-        if page_idx < len(target_tops):
-            return target_tops[page_idx] + offset_y
+        # Drive whichever canvas the mouse is hovering over, and sync the other perfectly
+        if event.widget == self.canvas_old:
+            self.canvas_old.yview_scroll(raw_delta, "units")
+            target_new_y = float(self.canvas_old.canvasy(0)) + self.sync_offset_y
+            self._scroll_canvas_to_y(self.canvas_new, target_new_y)
         else:
-            page_h = self._estimate_page_height(not target_is_new)
-            pages_past = page_idx - len(target_tops) + 1
-            return target_tops[-1] + (pages_past * page_h) + offset_y
-
-    def _canvas_y_to_fraction(self, canvas_h: float, canvas_y: float) -> float:
-        if canvas_h <= 0: return 0.0
-        return max(0.0, min(1.0, canvas_y / canvas_h))
-
-    def _current_canvas_y(self, canvas: tk.Canvas) -> float:
-        """Current scroll position as absolute canvas-y."""
-        return float(canvas.canvasy(0))
+            self.canvas_new.yview_scroll(raw_delta, "units")
+            target_old_y = float(self.canvas_new.canvasy(0)) - self.sync_offset_y
+            self._scroll_canvas_to_y(self.canvas_old, target_old_y)
+            
+        return "break"
 
     def _scroll_canvas_to_y(self, canvas: tk.Canvas, target_y: float):
-        """Scroll canvas so that canvas-y=target_y is at the top of view."""
+        """Helper to instantly jump a canvas to an absolute Y pixel coordinate."""
         bbox = canvas.bbox("all")
         if not bbox: return
         total_h = bbox[3] - bbox[1]
@@ -291,87 +195,35 @@ class PDFDiffApp:
         canvas.yview_moveto(fraction)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # SMOOTH SCROLL WITH PAGE-ALIGNED SYNC
+    # FILE SELECTION
     # ─────────────────────────────────────────────────────────────────────────
 
-    def on_mousewheel(self, event):
-        if self.is_syncing:
-            return "break"
-        self.is_syncing = True
+    def select_old(self):
+        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
+        if path:
+            self.old_file = path
+            name = os.path.basename(path)
+            self.btn_old.config(text=f"📄 {name[:19] + '…' if len(name) > 22 else name}", fg=ACCENT, highlightbackground=ACCENT)
+            self.check_ready()
 
-        if   event.num == 4: raw_delta = -1
-        elif event.num == 5: raw_delta =  1
-        else:
-            raw_delta = int(-1 * (event.delta / 120))
-            if raw_delta == 0:
-                raw_delta = -1 if event.delta > 0 else 1
+    def select_new(self):
+        path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
+        if path:
+            self.new_file = path
+            name = os.path.basename(path)
+            self.btn_new.config(text=f"📄 {name[:19] + '…' if len(name) > 22 else name}", fg=ACCENT, highlightbackground=ACCENT)
+            self.check_ready()
 
-        page_h = self._estimate_page_height(event.widget == self.canvas_old)
-        vel = raw_delta * page_h * SCROLL_SPEED
+    def check_ready(self):
+        if self.old_file and self.new_file:
+            self.btn_run.config(state=tk.NORMAL)
 
-        if event.widget == self.canvas_old:
-            self._vel_old += vel
-        else:
-            self._vel_new += vel
-
-        if self._scroll_after is None:
-            self._scroll_after = self.root.after(0, self._animate_scroll)
-
-        self.root.after(10, lambda: setattr(self, 'is_syncing', False))
-        return "break"
-
-    def _estimate_page_height(self, is_old: bool) -> float:
-        page_tops = self._old_page_tops if is_old else self._new_page_tops
-        if len(page_tops) >= 2:
-            return page_tops[1] - page_tops[0]
-        return 700.0
-
-    def _animate_scroll(self):
-        """
-        One animation frame. Moves the DRIVING canvas by its velocity,
-        then precisely syncs the TARGET canvas using intra-page pixel offsets.
-        """
-        still_moving = False
-
-        # ── Old canvas driving ────────────────────────────────────────────
-        if abs(self._vel_old) > 0.5:
-            cur_y = self._current_canvas_y(self.canvas_old)
-            new_y = cur_y + self._vel_old
-            self._scroll_canvas_to_y(self.canvas_old, new_y)
-
-            target_y = self._map_y_to_target(
-                self._old_page_tops, self._new_page_tops, new_y, target_is_new=True
-            )
-            self._scroll_canvas_to_y(self.canvas_new, target_y)
-
-            self._vel_old *= SCROLL_EASING
-            still_moving = True
-        else:
-            self._vel_old = 0.0
-
-        # ── New canvas driving ────────────────────────────────────────────
-        if abs(self._vel_new) > 0.5:
-            cur_y = self._current_canvas_y(self.canvas_new)
-            new_y = cur_y + self._vel_new
-            self._scroll_canvas_to_y(self.canvas_new, new_y)
-
-            target_y = self._map_y_to_target(
-                self._new_page_tops, self._old_page_tops, new_y, target_is_new=False
-            )
-            self._scroll_canvas_to_y(self.canvas_old, target_y)
-
-            self._vel_new *= SCROLL_EASING
-            still_moving = True
-        else:
-            self._vel_new = 0.0
-
-        if still_moving:
-            self._scroll_after = self.root.after(SCROLL_INTERVAL, self._animate_scroll)
-        else:
-            self._scroll_after = None
+    def _set_status(self, msg, error=False, warn=False):
+        color = ERROR_COLOR if error else (WARN_COLOR if warn else SUBTEXT)
+        self.lbl_status.config(text=msg[:87] + "…" if len(msg) > 90 else msg, fg=color)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # RUN
+    # RUN & CORE LOGIC
     # ─────────────────────────────────────────────────────────────────────────
 
     def run_diff(self):
@@ -382,19 +234,12 @@ class PDFDiffApp:
         self.new_photos.clear()
         self.old_y = PAGE_GAP
         self.new_y = PAGE_GAP
-        self._old_page_tops.clear()
-        self._new_page_tops.clear()
-        self._vel_old = 0.0
-        self._vel_new = 0.0
+        self.sync_offset_y = 0.0  # Reset alignment offset
         self.progress['value'] = 2
         self._set_status("Starting…")
         self.root.update_idletasks()
 
         threading.Thread(target=self.diff_worker, daemon=True).start()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # CORE LOGIC
-    # ─────────────────────────────────────────────────────────────────────────
 
     def extract_page_range(self, pdf_path, start_page, end_page):
         words = []
@@ -430,9 +275,7 @@ class PDFDiffApp:
             if not candidates: continue
             for j in candidates:
                 run = 0
-                while (i + run < len(old_texts) and
-                       j + run < len(new_texts) and
-                       old_texts[i + run] == new_texts[j + run]):
+                while (i + run < len(old_texts) and j + run < len(new_texts) and old_texts[i + run] == new_texts[j + run]):
                     run += 1
                 if run >= SEAM_MIN_RUN:
                     if not best_seam or (i + run) > best_seam['old_seam']:
@@ -446,9 +289,9 @@ class PDFDiffApp:
         overlay = Image.new('RGBA', pil_img.size, (255, 255, 255, 0))
         draw    = ImageDraw.Draw(overlay)
         for w in highlights:
-            x0 = w['x0']     * RENDER_SCALE - 2
-            y0 = w['top']    * RENDER_SCALE - 2
-            x1 = w['x1']     * RENDER_SCALE + 2
+            x0 = w['x0'] * RENDER_SCALE - 2
+            y0 = w['top'] * RENDER_SCALE - 2
+            x1 = w['x1'] * RENDER_SCALE + 2
             y1 = w['bottom'] * RENDER_SCALE + 2
             draw.rectangle([x0, y0, x1, y1], fill=color)
         return Image.alpha_composite(pil_img, overlay)
@@ -467,24 +310,14 @@ class PDFDiffApp:
     def diff_worker(self):
         old_pdf_doc = new_pdf_doc = None
         try:
-            for label, path in (("Old", self.old_file), ("New", self.new_file)):
-                if not os.path.exists(path):
-                    raise FileNotFoundError(f"{label} PDF not found: {path}")
-
             old_pdf_doc = pdfium.PdfDocument(self.old_file)
             new_pdf_doc = pdfium.PdfDocument(self.new_file)
-
             total_old_pages = len(old_pdf_doc)
             total_new_pages = len(new_pdf_doc)
-
-            if total_old_pages == 0: raise ValueError("Old PDF has no pages.")
-            if total_new_pages == 0: raise ValueError("New PDF has no pages.")
-
             total_chunks = math.ceil(max(total_old_pages, total_new_pages) / CHUNK_PAGES)
 
             old_tail, new_tail = [], []
             total_removed, total_added = 0, 0
-            skipped_chunks = 0
 
             for chunk in range(total_chunks):
                 page_start   = chunk * CHUNK_PAGES
@@ -494,18 +327,13 @@ class PDFDiffApp:
 
                 pct = int(5 + (chunk / total_chunks) * 90)
                 self.q.put(('progress', pct))
-                self.q.put(('status',
-                    f"Processing pages {page_start+1}–"
-                    f"{max(old_page_end, new_page_end)+1} of "
-                    f"{max(total_old_pages, total_new_pages)} "
-                    f"(Chunk {chunk+1}/{total_chunks})…"))
+                self.q.put(('status', f"Processing pages {page_start+1}–{max(old_page_end, new_page_end)+1}..."))
 
                 try:
                     old_chunk_words = self.extract_page_range(self.old_file, page_start, old_page_end)
                     new_chunk_words = self.extract_page_range(self.new_file, page_start, new_page_end)
                 except Exception as extract_err:
                     self.q.put(('warn', f"Chunk {chunk+1} extraction failed: {extract_err}"))
-                    skipped_chunks += 1
                     continue
 
                 old_words = old_tail + old_chunk_words
@@ -528,8 +356,7 @@ class PDFDiffApp:
                 old_commit = old_words[:commit_old_count]
                 new_commit = new_words[:commit_new_count]
 
-                sm = difflib.SequenceMatcher(
-                    None, [w['text'] for w in old_commit], [w['text'] for w in new_commit])
+                sm = difflib.SequenceMatcher(None, [w['text'] for w in old_commit], [w['text'] for w in new_commit])
                 removed_words, added_words = [], []
 
                 for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -544,25 +371,17 @@ class PDFDiffApp:
                 first_old_render = old_tail[0]['page'] if old_tail else page_start
                 first_new_render = new_tail[0]['page'] if new_tail else page_start
 
-                self.render_and_queue_pages(
-                    old_pdf_doc, first_old_render, last_old_page, removed_words, REMOVED_COLOR, 'page_old')
-                self.render_and_queue_pages(
-                    new_pdf_doc, first_new_render, last_new_page, added_words, ADDED_COLOR, 'page_new')
+                self.render_and_queue_pages(old_pdf_doc, first_old_render, last_old_page, removed_words, REMOVED_COLOR, 'page_old')
+                self.render_and_queue_pages(new_pdf_doc, first_new_render, last_new_page, added_words, ADDED_COLOR, 'page_new')
 
                 old_tail = old_words[commit_old_count:]
                 new_tail = new_words[commit_new_count:]
 
-            done_msg = f"✅ Done — {total_removed} removed · {total_added} added"
-            if skipped_chunks: done_msg += f"  ⚠ {skipped_chunks} chunk(s) skipped"
-            self.q.put(('done', done_msg))
+            self.q.put(('done', f"✅ Done — {total_removed} removed · {total_added} added"))
 
-        except FileNotFoundError as e: self.q.put(('error', str(e)))
-        except ValueError as e: self.q.put(('error', str(e)))
-        except MemoryError: self.q.put(('error', "Out of memory. Try a smaller PDF or reduce RENDER_SCALE."))
         except Exception as e:
             full  = traceback.format_exc()
-            short = f"{type(e).__name__}: {e}"
-            self.q.put(('error_full', (short, full)))
+            self.q.put(('error', f"{type(e).__name__}: {e}"))
         finally:
             if old_pdf_doc:
                 try: old_pdf_doc.close()
@@ -583,19 +402,15 @@ class PDFDiffApp:
                 if msg_type == 'status': self._set_status(data)
                 elif msg_type == 'warn': self._set_status(data, warn=True)
                 elif msg_type == 'progress': self.progress['value'] = data
-
                 elif msg_type in ('page_old', 'page_new'):
                     is_old     = (msg_type == 'page_old')
                     canvas     = self.canvas_old if is_old else self.canvas_new
                     photos     = self.old_photos  if is_old else self.new_photos
                     current_y  = self.old_y       if is_old else self.new_y
-                    page_tops  = self._old_page_tops if is_old else self._new_page_tops
 
                     photo = ImageTk.PhotoImage(data)
                     photos.append(photo)
                     x_pos = canvas.winfo_width() // 2
-
-                    page_tops.append(float(current_y))
 
                     canvas.create_rectangle(
                         x_pos - data.width // 2 - 1, current_y - 1,
@@ -617,14 +432,6 @@ class PDFDiffApp:
 
                 elif msg_type == 'error':
                     self._set_status(f"❌ {data}", error=True)
-                    self.btn_run.config(state=tk.NORMAL)
-                    self.progress['value'] = 0
-
-                elif msg_type == 'error_full':
-                    short, full = data
-                    self._full_status_text = full
-                    self.lbl_status.config(
-                        text=f"❌ {short[:80]}…  (click to copy full trace)", fg=ERROR_COLOR)
                     self.btn_run.config(state=tk.NORMAL)
                     self.progress['value'] = 0
 
