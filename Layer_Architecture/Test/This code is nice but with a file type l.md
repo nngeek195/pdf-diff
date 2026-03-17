@@ -1,0 +1,6 @@
+This code is nice but with a file type like pdfs this stucture is not good enogh so here is my plan
+- first extract content in related to 1O pages
+- Then take first 7 words of the old page and see the most matching sequence to it if there is no any matching sequence to it then reduce the size of of sequence one by one until find the matching sequence
+- But if the sequence's size is less than 4 and of you find some this matching to it please look is there anyothere sequence match to it, if there are some same similar sqence/words more than 2, ignore that word and mark it as deleted or if not keep it as matching sequence.
+- We take 10 pages fro  both know, so think either we go with 10 pages of new book with 10 pages of old book if the old books 10 pages extect word are not finish to mark then go to the 11nth page of new PDF. It mean simply extect words of 10 pages in new books and until we finish its work extract wordsfrom new book.
+- after we finish the work related to the extrected list then display that finish pages and delete the finished pages' word list 
