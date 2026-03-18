@@ -3,14 +3,15 @@ from tkinter import filedialog, ttk
 import threading
 import queue
 import os
-import difflib
+import math
+import bisect
 import traceback
 
 import pdfplumber
 import pypdfium2 as pdfium
 from PIL import Image, ImageTk, ImageDraw
 
-# ── Theme ──────────────────────────────────────────────────────────────────
+# ── Theme ─────────────────────────────────────────────────────────────────────
 BG            = "#0D1117"
 SURFACE       = "#161B22"
 SURFACE2      = "#21262D"
@@ -23,74 +24,200 @@ REMOVED_COLOR = (255, 213,  79, 115)
 ERROR_COLOR   = "#F85149"
 WARN_COLOR    = "#E3B341"
 
-RENDER_SCALE  = 1.5
-PAGE_GAP      = 28
-CHUNK_PAGES   = 10
+RENDER_SCALE    = 1.5
+PAGE_GAP        = 28
+SCROLL_INTERVAL = 12
+SCROLL_EASING   = 0.78
+SCROLL_SPEED    = 0.06
 
-# Seam probe settings
-SEQ_START     = 7   # start probe length
-SEQ_HARD_MIN  = 4   # absolute minimum — below this never anchor
-SEQ_AMBIG_MAX = 2   # if short match appears more than this many times → skip
+# KV mechanism tuning
+GAP_MULTIPLIER  = 2.5   # gap > avg_spacing * this  →  column/sequence break
+ROW_TOLERANCE   = 0.55  # fraction of avg word height to treat as "same row"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SEAM FINDER
-#
-#  Scans the TAIL of old_buf (last 30%) and searches for each position's
-#  word sequence inside new_buf. Probes shrink from SEQ_START down to
-#  SEQ_HARD_MIN. Short matches are checked for ambiguity.
-#  Returns the deepest (furthest-committing) valid anchor found.
-# ─────────────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  KV MECHANISM
+# ═════════════════════════════════════════════════════════════════════════════
 
-def find_seam(old_words: list, new_words: list) -> dict | None:
+# ── Theme & constants (unchanged) ───────────────────────────────────────────
+# ... (your existing constants stay exactly the same)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LINE CLUSTERING (replaces the old KV mechanism)
+# ═════════════════════════════════════════════════════════════════════════════
+def _page_metrics(words: list) -> tuple[float, float]:
+    """Kept for compatibility – only row_tol is now used."""
+    if not words:
+        return 60.0, 8.0
+    heights = [w['bottom'] - w['top'] for w in words]
+    avg_h = sum(heights) / len(heights)
+    row_tol = avg_h * ROW_TOLERANCE
+    return 60.0, row_tol   # col_break no longer needed
+
+
+def build_kv_sequences(words: list) -> list[list[dict]]:
     """
-    Returns {'old_end': int, 'new_end': int} exclusive indices, or None.
-    old_end / new_end = everything before these is safe to diff+render.
+    Robust reading-order reconstruction using Line Clustering.
+    Returns list of sequences (each sequence = one logical paragraph/column).
     """
-    old_texts = [w['text'] for w in old_words]
-    new_texts = [w['text'] for w in new_words]
+    if not words:
+        return []
 
-    if not old_texts or not new_texts:
-        return None
+    _, row_tol = _page_metrics(words)
+    heights = [w['bottom'] - w['top'] for w in words]
+    avg_h = sum(heights) / len(heights) if heights else 10.0
 
-    # Index: word → [positions in new]
-    new_pos: dict[str, list[int]] = {}
-    for j, t in enumerate(new_texts):
-        new_pos.setdefault(t, []).append(j)
+    # 1. Group words into horizontal lines
+    sorted_words = sorted(words, key=lambda w: (w['top'], w['x0']))
+    lines: list[list[dict]] = []
+    if sorted_words:
+        current = [sorted_words[0]]
+        for w in sorted_words[1:]:
+            if abs(w['top'] - current[0]['top']) <= row_tol * 1.2:
+                current.append(w)
+            else:
+                current.sort(key=lambda ww: ww['x0'])
+                lines.append(current)
+                current = [w]
+        current.sort(key=lambda ww: ww['x0'])
+        lines.append(current)
 
-    # Only scan the tail of old (last 30%)
-    scan_start = max(0, int(len(old_texts) * 0.70))
-    best = None
+    if not lines:
+        return []
 
-    for i in range(scan_start, len(old_texts)):
-        for probe_len in range(SEQ_START, SEQ_HARD_MIN - 1, -1):
-            if i + probe_len > len(old_texts):
-                continue
+    # Accurate vertical gaps (top of next line – bottom of previous line)
+    line_tops = [min(w['top'] for w in line) for line in lines]
+    line_bottoms = [max(w['bottom'] for w in line) for line in lines]
+    v_gaps = [line_tops[i] - line_bottoms[i-1] for i in range(1, len(lines))]
 
-            probe = old_texts[i : i + probe_len]
-            candidates = new_pos.get(probe[0], [])
-            matches = [j for j in candidates
-                       if new_texts[j : j + probe_len] == probe]
+    avg_vgap = sum(v_gaps) / len(v_gaps) if v_gaps else 0
+    block_gap = max(avg_vgap * GAP_MULTIPLIER, avg_h * 2.5)
 
-            if not matches:
-                continue
+    # 2. Group lines into blocks (paragraphs)
+    blocks: list[list[list[dict]]] = []
+    current_block = [lines[0]]
+    for i in range(1, len(lines)):
+        if v_gaps[i-1] <= block_gap:
+            current_block.append(lines[i])
+        else:
+            blocks.append(current_block)
+            current_block = [lines[i]]
+    blocks.append(current_block)
 
-            # At minimum probe length: check ambiguity
-            if probe_len == SEQ_HARD_MIN and len(matches) > SEQ_AMBIG_MAX:
-                break   # too ambiguous at this i, advance i
+    # 3. For each block: detect columns + flatten to sequences
+    sequences: list[list[dict]] = []
+    for block_lines in blocks:
+        if not block_lines:
+            continue
 
-            # Valid anchor — keep the one that commits the most old words
-            candidate = {'old_end': i + probe_len, 'new_end': matches[0] + probe_len}
-            if best is None or candidate['old_end'] > best['old_end']:
-                best = candidate
-            break   # found best probe_len for this i, move to next i
+        # Get left margin of each line
+        line_lefts = [line[0]['x0'] for line in block_lines]
 
-    return best
+        # Sort lines by left x for column detection
+        sorted_block = sorted(block_lines, key=lambda line: line[0]['x0'])
+        sorted_lefts = [line[0]['x0'] for line in sorted_block]
+
+        # Column break threshold
+        if len(sorted_block) > 1:
+            x_gaps = [sorted_lefts[k+1] - sorted_lefts[k] for k in range(len(sorted_lefts)-1)]
+            avg_xgap = sum(x_gaps) / len(x_gaps)
+            col_break_x = max(avg_xgap * GAP_MULTIPLIER, avg_h * 4.0)
+        else:
+            col_break_x = 9999
+
+        # Split into column groups
+        col_groups = []
+        current_col = [sorted_block[0]]
+        for nxt in sorted_block[1:]:
+            if nxt[0]['x0'] - current_col[-1][0]['x0'] > col_break_x:
+                col_groups.append(current_col)
+                current_col = [nxt]
+            else:
+                current_col.append(nxt)
+        col_groups.append(current_col)
+
+        # For each column: sort lines by y (top-to-bottom) and flatten words
+        for col_lines in col_groups:
+            col_lines_y = sorted(col_lines, key=lambda ln: ln[0]['top'])
+            seq = []
+            for ln in col_lines_y:
+                seq.extend(ln)          # words already left-to-right
+            if seq:
+                sequences.append(seq)
+
+    return sequences
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  APP
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  LCS DIFF
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _lcs_length(a: list[str], b: list[str]) -> int:
+    """Two-row LCS length only (memory efficient)."""
+    n = len(b)
+    prev = [0] * (n + 1)
+    for ai in a:
+        curr = [0] * (n + 1)
+        for j, bj in enumerate(b, 1):
+            curr[j] = prev[j-1] + 1 if ai == bj else max(prev[j], curr[j-1])
+        prev = curr
+    return prev[n]
+
+
+def best_match(old_seq: list[dict], new_seqs: list[list[dict]]) -> list[dict]:
+    """Return the new sequence with the highest LCS score vs old_seq."""
+    if not new_seqs:
+        return []
+    ot = [w['text'] for w in old_seq]
+    best_s, best_sc = new_seqs[0], -1.0
+    for ns in new_seqs:
+        nt = [w['text'] for w in ns]
+        if not nt: continue
+        sc = _lcs_length(ot, nt) / max(len(ot), len(nt), 1)
+        if sc > best_sc:
+            best_sc, best_s = sc, ns
+    return best_s
+
+
+def lcs_diff(old_seq: list[dict], new_seq: list[dict]) -> tuple[set, set]:
+    """
+    Full LCS backtrack.
+    Returns (old_deleted_ids, new_added_ids) — id(word) sets not in LCS.
+    """
+    a = [w['text'] for w in old_seq]
+    b = [w['text'] for w in new_seq]
+    m, n = len(a), len(b)
+    if m == 0 and n == 0:
+        return set(), set()
+
+    # Full DP table (page-sized, manageable)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            dp[i][j] = (dp[i-1][j-1] + 1 if a[i-1] == b[j-1]
+                        else max(dp[i-1][j], dp[i][j-1]))
+
+    # Backtrack
+    old_lcs, new_lcs = set(), set()
+    i, j = m, n
+    while i > 0 and j > 0:
+        if a[i-1] == b[j-1]:
+            old_lcs.add(i-1); new_lcs.add(j-1)
+            i -= 1; j -= 1
+        elif dp[i-1][j] >= dp[i][j-1]:
+            i -= 1
+        else:
+            j -= 1
+
+    old_del = {id(old_seq[k]) for k in range(m) if k not in old_lcs}
+    new_add = {id(new_seq[k]) for k in range(n) if k not in new_lcs}
+    return old_del, new_add
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  MAIN APPLICATION
+# ═════════════════════════════════════════════════════════════════════════════
 
 class PDFDiffApp:
     def __init__(self, root):
@@ -99,28 +226,35 @@ class PDFDiffApp:
         self.root.geometry("1300x850")
         self.root.configure(bg=BG)
 
-        self.old_file = None
-        self.new_file = None
+        self.old_file = self.new_file = None
         self.q = queue.Queue()
 
-        self.old_photos = []
-        self.new_photos = []
+        self.old_photos: list = []
+        self.new_photos: list = []
         self.old_y = PAGE_GAP
         self.new_y = PAGE_GAP
-        self.sync_offset_y = 0.0
+
+        self.is_syncing        = False
+        self._old_page_tops:   list[float] = []
+        self._new_page_tops:   list[float] = []
+        self._vel_old:         float = 0.0
+        self._vel_new:         float = 0.0
+        self._scroll_after              = None
+        self._full_status_text: str    = ""
 
         self.setup_ui()
         self.process_queue()
 
-    # ── UI (unchanged from original) ──────────────────────────────────────────
+    # ── UI ────────────────────────────────────────────────────────────────────
 
     def setup_ui(self):
         style = ttk.Style()
         style.theme_use('default')
         style.configure("TProgressbar", thickness=3,
                         background=ACCENT, troughcolor=BG, borderwidth=0)
-        self.progress = ttk.Progressbar(self.root, style="TProgressbar",
-                                        orient="horizontal", mode="determinate")
+        self.progress = ttk.Progressbar(
+            self.root, style="TProgressbar",
+            orient="horizontal", mode="determinate")
         self.progress.pack(fill=tk.X, side=tk.TOP)
 
         top_bar = tk.Frame(self.root, bg=SURFACE, height=56,
@@ -128,7 +262,8 @@ class PDFDiffApp:
         top_bar.pack(fill=tk.X, side=tk.TOP)
         top_bar.pack_propagate(False)
 
-        tk.Label(top_bar, text="⬛ PDF DIFF", font=("Courier New", 14, "bold"),
+        tk.Label(top_bar, text="⬛ PDF DIFF",
+                 font=("Courier New", 14, "bold"),
                  bg=SURFACE, fg=TEXT).pack(side=tk.LEFT, padx=(20, 10), pady=15)
 
         self.btn_old = tk.Button(
@@ -154,135 +289,226 @@ class PDFDiffApp:
             activebackground="#2ea043", activeforeground="white")
         self.btn_run.pack(side=tk.LEFT, padx=10, pady=10)
 
-        self.lbl_status = tk.Label(top_bar, text="Select both PDFs to begin.",
-                                   bg=SURFACE, fg=SUBTEXT, font=("Arial", 10))
+        legend = tk.Frame(top_bar, bg=SURFACE)
+        legend.pack(side=tk.LEFT, padx=20, pady=15)
+        tk.Label(legend, text="", bg="#FFD54F",
+                 width=2, height=1).pack(side=tk.LEFT)
+        tk.Label(legend, text="Removed", bg=SURFACE,
+                 fg=SUBTEXT, font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 15))
+        tk.Label(legend, text="", bg="#4FC3F7",
+                 width=2, height=1).pack(side=tk.LEFT)
+        tk.Label(legend, text="Added", bg=SURFACE,
+                 fg=SUBTEXT, font=("Arial", 9)).pack(side=tk.LEFT, padx=(5, 0))
+
+        self.lbl_status = tk.Label(
+            top_bar, text="Select both PDFs to begin.",
+            bg=SURFACE, fg=SUBTEXT, font=("Arial", 10), cursor="hand2")
         self.lbl_status.pack(side=tk.RIGHT, padx=20, pady=15)
+        self.lbl_status.bind("<Button-1>", self._copy_status)
 
-        pane_wrapper = tk.Frame(self.root, bg=BG)
-        pane_wrapper.pack(fill=tk.BOTH, expand=True)
+        # ── Pane wrapper: Left scrollbar | Old canvas | Center scrollbar |
+        #                  New canvas | Right scrollbar  ─────────────────────
+        pane = tk.Frame(self.root, bg=BG)
+        pane.pack(fill=tk.BOTH, expand=True)
 
-        self.sb_old = ttk.Scrollbar(pane_wrapper, orient="vertical",
+        # Left independent scrollbar (OLD only)
+        self.sb_old = ttk.Scrollbar(pane, orient="vertical",
                                     command=self._scroll_old_indep)
         self.sb_old.pack(side=tk.LEFT, fill=tk.Y)
 
-        left_col = tk.Frame(pane_wrapper, bg=BG)
+        # Old canvas column
+        left_col = tk.Frame(pane, bg=BG)
         left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        left_header = tk.Frame(left_col, bg=SURFACE2, height=30,
-                               highlightbackground=BORDER, highlightthickness=1)
-        left_header.pack(fill=tk.X)
-        left_header.pack_propagate(False)
-        tk.Label(left_header, text="OLD VERSION", bg=SURFACE2,
+        lh = tk.Frame(left_col, bg=SURFACE2, height=30,
+                      highlightbackground=BORDER, highlightthickness=1)
+        lh.pack(fill=tk.X); lh.pack_propagate(False)
+        tk.Label(lh, text="OLD VERSION", bg=SURFACE2,
                  fg="#E3B341", font=("Arial", 9, "bold")).pack(
                      side=tk.LEFT, padx=14, pady=5)
-
         self.canvas_old = tk.Canvas(left_col, bg="#010409", highlightthickness=0,
                                     yscrollcommand=self._update_sbs_old)
         self.canvas_old.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.sb_center = ttk.Scrollbar(pane_wrapper, orient="vertical",
+        # Center sync scrollbar (drives BOTH)
+        self.sb_center = ttk.Scrollbar(pane, orient="vertical",
                                        command=self._scroll_sync)
         self.sb_center.pack(side=tk.LEFT, fill=tk.Y)
 
-        self.sb_new = ttk.Scrollbar(pane_wrapper, orient="vertical",
+        # Right independent scrollbar (NEW only)
+        self.sb_new = ttk.Scrollbar(pane, orient="vertical",
                                     command=self._scroll_new_indep)
         self.sb_new.pack(side=tk.RIGHT, fill=tk.Y)
 
-        right_col = tk.Frame(pane_wrapper, bg=BG,
+        # New canvas column
+        right_col = tk.Frame(pane, bg=BG,
                              highlightbackground=BORDER, highlightthickness=1)
         right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        right_header = tk.Frame(right_col, bg=SURFACE2, height=30,
-                                highlightbackground=BORDER, highlightthickness=1)
-        right_header.pack(fill=tk.X)
-        right_header.pack_propagate(False)
-        tk.Label(right_header, text="NEW VERSION", bg=SURFACE2,
+        rh = tk.Frame(right_col, bg=SURFACE2, height=30,
+                      highlightbackground=BORDER, highlightthickness=1)
+        rh.pack(fill=tk.X); rh.pack_propagate(False)
+        tk.Label(rh, text="NEW VERSION", bg=SURFACE2,
                  fg=ACCENT, font=("Arial", 9, "bold")).pack(
                      side=tk.LEFT, padx=14, pady=5)
-
         self.canvas_new = tk.Canvas(right_col, bg="#010409", highlightthickness=0,
                                     yscrollcommand=self.sb_new.set)
         self.canvas_new.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        for canvas in (self.canvas_old, self.canvas_new):
-            canvas.bind("<MouseWheel>", self.on_mousewheel)
-            canvas.bind("<Button-4>",   self.on_mousewheel)
-            canvas.bind("<Button-5>",   self.on_mousewheel)
+        for c in (self.canvas_old, self.canvas_new):
+            c.bind("<MouseWheel>", self.on_mousewheel)
+            c.bind("<Button-4>",   self.on_mousewheel)
+            c.bind("<Button-5>",   self.on_mousewheel)
 
-    # ── Scrolling (unchanged from original) ───────────────────────────────────
-
-    def _update_offset(self):
-        self.sync_offset_y = (float(self.canvas_new.canvasy(0))
-                              - float(self.canvas_old.canvasy(0)))
+    # ── Scrollbar commands ────────────────────────────────────────────────────
 
     def _update_sbs_old(self, first, last):
+        """Old canvas scrolled: update left + center scrollbars."""
         self.sb_old.set(first, last)
         self.sb_center.set(first, last)
 
     def _scroll_old_indep(self, *args):
         self.canvas_old.yview(*args)
-        self._update_offset()
 
     def _scroll_new_indep(self, *args):
         self.canvas_new.yview(*args)
-        self._update_offset()
 
     def _scroll_sync(self, *args):
+        """Center scrollbar: scroll old, then align new by page."""
         self.canvas_old.yview(*args)
-        target = float(self.canvas_old.canvasy(0)) + self.sync_offset_y
-        self._scroll_canvas_to_y(self.canvas_new, target)
+        oy = float(self.canvas_old.canvasy(0))
+        ny = self._map_y(self._old_page_tops, self._new_page_tops, oy)
+        self._goto_y(self.canvas_new, ny)
+
+    # ── Scroll helpers ────────────────────────────────────────────────────────
+
+    def _goto_y(self, canvas: tk.Canvas, y: float):
+        bb = canvas.bbox("all")
+        if not bb: return
+        h = bb[3] - bb[1]
+        if h > 0:
+            canvas.yview_moveto(max(0.0, min(1.0, y / h)))
+
+    def _map_y(self, src_tops, dst_tops, src_y):
+        """
+        Map absolute canvas-y from src to dst preserving intra-page offset.
+        If the page exists in dst, lands on same relative position.
+        If dst is shorter, extrapolates using estimated page height.
+        """
+        if not src_tops:
+            return src_y
+        idx    = max(0, bisect.bisect_right(src_tops, src_y) - 1)
+        offset = src_y - src_tops[idx]
+        if dst_tops:
+            if idx < len(dst_tops):
+                return dst_tops[idx] + offset
+            ph = (dst_tops[1] - dst_tops[0]) if len(dst_tops) >= 2 else 700.0
+            return dst_tops[-1] + (idx - len(dst_tops) + 1) * ph + offset
+        return src_y
+
+    # ── Smooth scroll ─────────────────────────────────────────────────────────
 
     def on_mousewheel(self, event):
-        if   event.num == 4: delta = -1
-        elif event.num == 5: delta =  1
-        else:                delta = int(-1 * (event.delta / 120))
-        if event.widget == self.canvas_old:
-            self.canvas_old.yview_scroll(delta, "units")
-            self._scroll_canvas_to_y(
-                self.canvas_new,
-                float(self.canvas_old.canvasy(0)) + self.sync_offset_y)
+        if self.is_syncing:
+            return "break"
+        self.is_syncing = True
+
+        if   event.num == 4: d = -1
+        elif event.num == 5: d =  1
         else:
-            self.canvas_new.yview_scroll(delta, "units")
-            self._scroll_canvas_to_y(
-                self.canvas_old,
-                float(self.canvas_new.canvasy(0)) - self.sync_offset_y)
+            d = int(-1 * (event.delta / 120))
+            if d == 0: d = -1 if event.delta > 0 else 1
+
+        is_old = (event.widget == self.canvas_old)
+        tops   = self._old_page_tops if is_old else self._new_page_tops
+        ph     = (tops[1] - tops[0]) if len(tops) >= 2 else 700.0
+        vel    = d * ph * SCROLL_SPEED
+
+        if is_old: self._vel_old += vel
+        else:      self._vel_new += vel
+
+        if self._scroll_after is None:
+            self._scroll_after = self.root.after(0, self._tick)
+
+        self.root.after(10, lambda: setattr(self, 'is_syncing', False))
         return "break"
 
-    def _scroll_canvas_to_y(self, canvas, target_y):
-        bbox = canvas.bbox("all")
-        if not bbox: return
-        h = bbox[3] - bbox[1]
-        if h <= 0: return
-        canvas.yview_moveto(max(0.0, min(1.0, target_y / h)))
+    def _tick(self):
+        moving = False
+
+        if abs(self._vel_old) > 0.5:
+            cur = float(self.canvas_old.canvasy(0))
+            ny  = cur + self._vel_old
+            self._goto_y(self.canvas_old, ny)
+            self._goto_y(self.canvas_new,
+                         self._map_y(self._old_page_tops, self._new_page_tops, ny))
+            self._vel_old *= SCROLL_EASING
+            moving = True
+        else:
+            self._vel_old = 0.0
+
+        if abs(self._vel_new) > 0.5:
+            cur = float(self.canvas_new.canvasy(0))
+            ny  = cur + self._vel_new
+            self._goto_y(self.canvas_new, ny)
+            self._goto_y(self.canvas_old,
+                         self._map_y(self._new_page_tops, self._old_page_tops, ny))
+            self._vel_new *= SCROLL_EASING
+            moving = True
+        else:
+            self._vel_new = 0.0
+
+        self._scroll_after = (
+            self.root.after(SCROLL_INTERVAL, self._tick) if moving else None)
 
     # ── File selection ────────────────────────────────────────────────────────
 
     def select_old(self):
         p = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if p:
-            self.old_file = p
-            n = os.path.basename(p)
-            self.btn_old.config(
-                text=f"📄 {n[:19]+'…' if len(n)>22 else n}",
-                fg=ACCENT, highlightbackground=ACCENT)
-            self.check_ready()
+        if not p: return
+        e = self._validate(p)
+        if e: self._set_status(f"Old PDF: {e}", error=True); return
+        self.old_file = p
+        n = os.path.basename(p)
+        self.btn_old.config(
+            text=f"📄 {n[:19]+'…' if len(n)>22 else n}",
+            fg=ACCENT, highlightbackground=ACCENT)
+        self.check_ready()
 
     def select_new(self):
         p = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if p:
-            self.new_file = p
-            n = os.path.basename(p)
-            self.btn_new.config(
-                text=f"📄 {n[:19]+'…' if len(n)>22 else n}",
-                fg=ACCENT, highlightbackground=ACCENT)
-            self.check_ready()
+        if not p: return
+        e = self._validate(p)
+        if e: self._set_status(f"New PDF: {e}", error=True); return
+        self.new_file = p
+        n = os.path.basename(p)
+        self.btn_new.config(
+            text=f"📄 {n[:19]+'…' if len(n)>22 else n}",
+            fg=ACCENT, highlightbackground=ACCENT)
+        self.check_ready()
+
+    def _validate(self, path):
+        if not os.path.exists(path):      return "File not found."
+        if os.path.getsize(path) == 0:    return "File is empty."
+        try:
+            with open(path, 'rb') as f:
+                if f.read(5) != b'%PDF-': return "Not a valid PDF."
+        except OSError as e:              return f"Cannot read: {e}"
+        return None
 
     def check_ready(self):
         if self.old_file and self.new_file:
             self.btn_run.config(state=tk.NORMAL)
+            self._set_status("Ready — click ▶ Compare.")
 
     def _set_status(self, msg, error=False, warn=False):
+        self._full_status_text = msg
         color = ERROR_COLOR if error else (WARN_COLOR if warn else SUBTEXT)
         self.lbl_status.config(
             text=msg[:87]+'…' if len(msg) > 90 else msg, fg=color)
+
+    def _copy_status(self, _=None):
+        if self._full_status_text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._full_status_text)
 
     # ── Run ───────────────────────────────────────────────────────────────────
 
@@ -294,124 +520,32 @@ class PDFDiffApp:
         self.new_photos.clear()
         self.old_y = PAGE_GAP
         self.new_y = PAGE_GAP
-        self.sync_offset_y = 0.0
+        self._old_page_tops.clear()
+        self._new_page_tops.clear()
+        self._vel_old = self._vel_new = 0.0
         self.progress['value'] = 2
         self._set_status("Starting…")
         self.root.update_idletasks()
         threading.Thread(target=self._worker, daemon=True).start()
 
-    # ── Extraction ────────────────────────────────────────────────────────────
+    # ── Rendering helper ──────────────────────────────────────────────────────
 
-    def _extract(self, path: str, start: int, end: int) -> list:
-        """Extract word dicts from pages [start..end] inclusive (0-based)."""
-        words = []
-        with pdfplumber.open(path) as pdf:
-            end = min(end, len(pdf.pages) - 1)
-            if start > end:
-                return words
-            for pn in range(start, end + 1):
-                try:
-                    for w in pdf.pages[pn].extract_words():
-                        words.append({
-                            'text':   w['text'],
-                            'page':   pn,
-                            'x0':     w['x0'],
-                            'top':    w['top'],
-                            'x1':     w['x1'],
-                            'bottom': w['bottom'],
-                        })
-                except Exception as e:
-                    self.q.put(('warn', f"Page {pn+1} read error: {e}"))
-        return words
-
-    def _pull(self, path: str, buf: list, cur: int, total: int) -> tuple:
-        """Append next CHUNK_PAGES worth of words to buf. Returns (buf, new_cur)."""
-        if cur >= total:
-            return buf, cur
-        end = min(cur + CHUNK_PAGES - 1, total - 1)
-        return buf + self._extract(path, cur, end), min(cur + CHUNK_PAGES, total)
-
-    # ── Rendering ─────────────────────────────────────────────────────────────
-
-    def _render_page(self, doc, pn: int, highlights: list, color: tuple) -> Image.Image:
+    def _render(self, doc, pn: int,
+                highlights: list, color: tuple) -> Image.Image:
         bmp = doc[pn].render(scale=RENDER_SCALE)
         img = bmp.to_pil().convert("RGBA")
-        ov  = Image.new('RGBA', img.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(ov)
-        for w in highlights:
-            draw.rectangle([
-                w['x0']     * RENDER_SCALE - 2,
-                w['top']    * RENDER_SCALE - 2,
-                w['x1']     * RENDER_SCALE + 2,
-                w['bottom'] * RENDER_SCALE + 2,
-            ], fill=color)
-        return Image.alpha_composite(img, ov)
-
-    @staticmethod
-    def _pages_in_order(words: list) -> list:
-        """Unique page indices from words list, preserving document order."""
-        seen, out = set(), []
-        for w in words:
-            if w['page'] not in seen:
-                seen.add(w['page'])
-                out.append(w['page'])
-        return out
-
-    # ── Commit: diff + render, skip already-rendered pages ───────────────────
-
-    def _commit(self,
-                old_doc, new_doc,
-                old_words: list, new_words: list,
-                old_done: set, new_done: set) -> tuple:
-        """
-        Diff the two word lists, render each page exactly once,
-        push to queue progressively. Returns (n_removed, n_added).
-        old_done / new_done track already-rendered page indices (updated here).
-        """
-        if not old_words and not new_words:
-            return 0, 0
-
-        sm = difflib.SequenceMatcher(
-            None,
-            [w['text'] for w in old_words],
-            [w['text'] for w in new_words],
-            autojunk=False,
-        )
-        removed, added = [], []
-        for op, i1, i2, j1, j2 in sm.get_opcodes():
-            if op in ('replace', 'delete'): removed.extend(old_words[i1:i2])
-            if op in ('replace', 'insert'): added.extend(new_words[j1:j2])
-
-        # Per-page highlight maps
-        old_hl: dict[int, list] = {}
-        for w in removed: old_hl.setdefault(w['page'], []).append(w)
-
-        new_hl: dict[int, list] = {}
-        for w in added:   new_hl.setdefault(w['page'], []).append(w)
-
-        # Render OLD pages
-        for pn in self._pages_in_order(old_words):
-            if pn in old_done or pn >= len(old_doc):
-                continue
-            try:
-                img = self._render_page(old_doc, pn, old_hl.get(pn, []), REMOVED_COLOR)
-                self.q.put(('page_old', img))
-                old_done.add(pn)
-            except Exception as e:
-                self.q.put(('warn', f"Render OLD p{pn+1}: {e}"))
-
-        # Render NEW pages
-        for pn in self._pages_in_order(new_words):
-            if pn in new_done or pn >= len(new_doc):
-                continue
-            try:
-                img = self._render_page(new_doc, pn, new_hl.get(pn, []), ADDED_COLOR)
-                self.q.put(('page_new', img))
-                new_done.add(pn)
-            except Exception as e:
-                self.q.put(('warn', f"Render NEW p{pn+1}: {e}"))
-
-        return len(removed), len(added)
+        if highlights:
+            ov   = Image.new('RGBA', img.size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(ov)
+            for w in highlights:
+                draw.rectangle([
+                    w['x0']     * RENDER_SCALE - 2,
+                    w['top']    * RENDER_SCALE - 2,
+                    w['x1']     * RENDER_SCALE + 2,
+                    w['bottom'] * RENDER_SCALE + 2,
+                ], fill=color)
+            img = Image.alpha_composite(img, ov)
+        return img
 
     # ── Worker thread ─────────────────────────────────────────────────────────
 
@@ -420,148 +554,181 @@ class PDFDiffApp:
         try:
             old_doc = pdfium.PdfDocument(self.old_file)
             new_doc = pdfium.PdfDocument(self.new_file)
-
             total_old = len(old_doc)
             total_new = len(new_doc)
+            total     = max(total_old, total_new)
+            n_removed = n_added = 0
 
-            old_cur = new_cur = 0
-            old_buf: list = []
-            new_buf: list = []
-            old_done: set = set()   # pages already rendered on old side
-            new_done: set = set()   # pages already rendered on new side
+            for pn in range(total):
+                self.q.put(('progress', int(5 + 90 * pn / total)))
+                self.q.put(('status',   f"Page {pn+1} / {total}…"))
 
-            total_removed = total_added = 0
+                # ── Step 1: Extract ───────────────────────────────────────────
+                old_words = self._extract(self.old_file, pn) if pn < total_old else []
+                new_words = self._extract(self.new_file, pn) if pn < total_new else []
 
-            # Pull first batch from both sides
-            old_buf, old_cur = self._pull(self.old_file, old_buf, old_cur, total_old)
-            new_buf, new_cur = self._pull(self.new_file, new_buf, new_cur, total_new)
+                # ── Step 2: KV sequences ──────────────────────────────────────
+                old_seqs = build_kv_sequences(old_words)
+                new_seqs = build_kv_sequences(new_words)
 
-            while old_buf or new_buf:
+                # ── Step 3: LCS diff ──────────────────────────────────────────
+                # For every old sequence find best-matching new sequence, run LCS
+                old_del_ids: set[int] = set()
+                new_add_ids: set[int] = set()
+                matched_new_seqs: list = []
 
-                pct = int(5 + 90 * max(
-                    old_cur / max(total_old, 1),
-                    new_cur / max(total_new, 1)))
-                self.q.put(('progress', min(pct, 95)))
-                self.q.put(('status',
-                    f"OLD {old_cur}/{total_old} pages · NEW {new_cur}/{total_new} pages"))
+                for os_ in old_seqs:
+                    ns_ = best_match(os_, new_seqs)
+                    matched_new_seqs.append(ns_)
+                    d, a = lcs_diff(os_, ns_)
+                    old_del_ids |= d
+                    new_add_ids |= a
 
-                both_done = (old_cur >= total_old and new_cur >= total_new)
+                # New sequences with no match → all words are added
+                all_matched_new_ids = {id(w) for ns_ in matched_new_seqs
+                                       for w in ns_}
+                for ns_ in new_seqs:
+                    for w in ns_:
+                        if id(w) not in all_matched_new_ids:
+                            new_add_ids.add(id(w))
 
-                if both_done:
-                    # No more pages to pull — commit everything left
-                    r, a = self._commit(old_doc, new_doc,
-                                        old_buf, new_buf, old_done, new_done)
-                    total_removed += r
-                    total_added   += a
-                    break
+                old_hl = [w for w in old_words if id(w) in old_del_ids]
+                new_hl = [w for w in new_words if id(w) in new_add_ids]
+                n_removed += len(old_hl)
+                n_added   += len(new_hl)
 
-                seam = find_seam(old_buf, new_buf)
-
-                if seam:
-                    # Commit up to the anchor
-                    r, a = self._commit(
-                        old_doc, new_doc,
-                        old_buf[: seam['old_end']],
-                        new_buf[: seam['new_end']],
-                        old_done, new_done)
-                    total_removed += r
-                    total_added   += a
-
-                    # Drop committed words, keep remainder
-                    old_buf = old_buf[seam['old_end']:]
-                    new_buf = new_buf[seam['new_end']:]
-
-                    # Refill whichever side ran dry
-                    if not old_buf and old_cur < total_old:
-                        old_buf, old_cur = self._pull(
-                            self.old_file, old_buf, old_cur, total_old)
-                    if not new_buf and new_cur < total_new:
-                        new_buf, new_cur = self._pull(
-                            self.new_file, new_buf, new_cur, total_new)
-
+                # ── Step 4: Render ────────────────────────────────────────────
+                # Always emit a page for both sides (None = blank placeholder)
+                if pn < total_old:
+                    try:
+                        self.q.put(('page_old', self._render(old_doc, pn,
+                                                             old_hl, REMOVED_COLOR)))
+                    except Exception as e:
+                        self.q.put(('warn', f"Render OLD p{pn+1}: {e}"))
+                        self.q.put(('page_old', None))
                 else:
-                    # No seam yet — pull more pages to give the algorithm more context.
-                    # Pull NEW first (drain NEW until old words find a match), then OLD.
-                    pulled = False
-                    if new_cur < total_new:
-                        new_buf, new_cur = self._pull(
-                            self.new_file, new_buf, new_cur, total_new)
-                        pulled = True
-                    elif old_cur < total_old:
-                        old_buf, old_cur = self._pull(
-                            self.old_file, old_buf, old_cur, total_old)
-                        pulled = True
+                    self.q.put(('page_old', None))
 
-                    if not pulled:
-                        # Truly exhausted — force-commit remainder
-                        r, a = self._commit(old_doc, new_doc,
-                                            old_buf, new_buf, old_done, new_done)
-                        total_removed += r
-                        total_added   += a
-                        break
+                if pn < total_new:
+                    try:
+                        self.q.put(('page_new', self._render(new_doc, pn,
+                                                             new_hl, ADDED_COLOR)))
+                    except Exception as e:
+                        self.q.put(('warn', f"Render NEW p{pn+1}: {e}"))
+                        self.q.put(('page_new', None))
+                else:
+                    self.q.put(('page_new', None))
 
             self.q.put(('done',
-                f"✅ Done — {total_removed} removed · {total_added} added"))
+                        f"✅ Done — {n_removed} removed · {n_added} added"))
 
         except Exception as e:
-            self.q.put(('error',
-                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"))
+            self.q.put(('error_full',
+                        (f"{type(e).__name__}: {e}", traceback.format_exc())))
         finally:
             for doc in (old_doc, new_doc):
                 if doc:
                     try: doc.close()
                     except Exception: pass
 
-    # ── Queue processor (unchanged from original) ─────────────────────────────
+    def _extract(self, path: str, pn: int) -> list[dict]:
+        """Extract word dicts for page pn. Returns [] on any error."""
+        words = []
+        try:
+            with pdfplumber.open(path) as pdf:
+                if pn < len(pdf.pages):
+                    for w in pdf.pages[pn].extract_words():
+                        words.append({
+                            'text':   w['text'],
+                            'page':   pn,
+                            'x0':     float(w['x0']),
+                            'top':    float(w['top']),
+                            'x1':     float(w['x1']),
+                            'bottom': float(w['bottom']),
+                        })
+        except Exception as e:
+            self.q.put(('warn', f"Extract p{pn+1}: {e}"))
+        return words
+
+    # ── Queue processor ───────────────────────────────────────────────────────
 
     def process_queue(self):
-        try:
-            while True:
-                msg_type, data = self.q.get_nowait()
+        # We keep a reference image to size blank placeholders consistently
+        self._last_img_size = (int(595 * RENDER_SCALE), int(842 * RENDER_SCALE))
 
-                if msg_type == 'status':
-                    self._set_status(data)
-                elif msg_type == 'warn':
-                    self._set_status(data, warn=True)
-                elif msg_type == 'progress':
-                    self.progress['value'] = data
+        def _loop():
+            try:
+                while True:
+                    kind, data = self.q.get_nowait()
 
-                elif msg_type in ('page_old', 'page_new'):
-                    is_old    = (msg_type == 'page_old')
-                    canvas    = self.canvas_old if is_old else self.canvas_new
-                    photos    = self.old_photos  if is_old else self.new_photos
-                    current_y = self.old_y       if is_old else self.new_y
+                    if kind == 'status':
+                        self._set_status(data)
 
-                    photo = ImageTk.PhotoImage(data)
-                    photos.append(photo)
-                    x_pos = canvas.winfo_width() // 2
+                    elif kind == 'warn':
+                        self._set_status(data, warn=True)
 
-                    canvas.create_rectangle(
-                        x_pos - data.width  // 2 - 1, current_y - 1,
-                        x_pos + data.width  // 2 + 1, current_y + data.height + 1,
-                        outline=BORDER, fill=BORDER)
-                    canvas.create_image(x_pos, current_y, image=photo, anchor="n")
+                    elif kind == 'progress':
+                        self.progress['value'] = data
 
-                    new_y = current_y + data.height + PAGE_GAP
-                    if is_old: self.old_y = new_y
-                    else:      self.new_y = new_y
+                    elif kind in ('page_old', 'page_new'):
+                        is_old    = (kind == 'page_old')
+                        canvas    = self.canvas_old if is_old else self.canvas_new
+                        photos    = self.old_photos  if is_old else self.new_photos
+                        cur_y     = self.old_y       if is_old else self.new_y
+                        tops      = (self._old_page_tops if is_old
+                                     else self._new_page_tops)
 
-                    canvas.config(scrollregion=canvas.bbox("all"))
+                        # Blank placeholder for pages beyond shorter PDF
+                        if data is None:
+                            w, h = self._last_img_size
+                            data = Image.new("RGBA", (w, h), (13, 17, 23, 255))
+                        else:
+                            self._last_img_size = (data.width, data.height)
 
-                elif msg_type == 'done':
-                    self._set_status(data)
-                    self.btn_run.config(state=tk.NORMAL)
-                    self.progress['value'] = 100
-                    self.root.after(2000, lambda: self.progress.configure(value=0))
+                        photo = ImageTk.PhotoImage(data)
+                        photos.append(photo)
+                        x = max(canvas.winfo_width() // 2,
+                                data.width // 2 + 20)
 
-                elif msg_type == 'error':
-                    self._set_status(f"❌ {data}", error=True)
-                    self.btn_run.config(state=tk.NORMAL)
-                    self.progress['value'] = 0
+                        tops.append(float(cur_y))
 
-        except queue.Empty:
-            pass
-        self.root.after(50, self.process_queue)
+                        canvas.create_rectangle(
+                            x - data.width  // 2 - 1, cur_y - 1,
+                            x + data.width  // 2 + 1, cur_y + data.height + 1,
+                            outline=BORDER, fill=BORDER)
+                        canvas.create_image(x, cur_y, image=photo, anchor="n")
+
+                        nxt = cur_y + data.height + PAGE_GAP
+                        if is_old: self.old_y = nxt
+                        else:      self.new_y = nxt
+                        canvas.config(scrollregion=canvas.bbox("all"))
+
+                    elif kind == 'done':
+                        self._set_status(data)
+                        self.btn_run.config(state=tk.NORMAL)
+                        self.progress['value'] = 100
+                        self.root.after(2000,
+                            lambda: self.progress.configure(value=0))
+
+                    elif kind == 'error':
+                        self._set_status(f"❌ {data}", error=True)
+                        self.btn_run.config(state=tk.NORMAL)
+                        self.progress['value'] = 0
+
+                    elif kind == 'error_full':
+                        short, full = data
+                        self._full_status_text = full
+                        self.lbl_status.config(
+                            text=f"❌ {short[:78]}…  (click to copy trace)",
+                            fg=ERROR_COLOR)
+                        self.btn_run.config(state=tk.NORMAL)
+                        self.progress['value'] = 0
+
+            except queue.Empty:
+                pass
+            self.root.after(50, _loop)
+
+        _loop()
 
 
 if __name__ == "__main__":
