@@ -1,0 +1,1199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF Diff Engine — System Map</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:        #080C10;
+    --surface:   #0D1117;
+    --s2:        #131920;
+    --s3:        #1A2230;
+    --border:    rgba(255,255,255,0.07);
+    --border2:   rgba(255,255,255,0.13);
+    --text:      #E2EAF4;
+    --sub:       #6B7C93;
+    --dim:       #3D4F63;
+
+    --blue:      #3B9EFF;
+    --blue-dim:  rgba(59,158,255,0.12);
+    --blue-glow: rgba(59,158,255,0.25);
+    --amber:     #F5A623;
+    --amber-dim: rgba(245,166,35,0.12);
+    --green:     #3DD68C;
+    --green-dim: rgba(61,214,140,0.12);
+    --red:       #F75A5A;
+    --red-dim:   rgba(247,90,90,0.1);
+    --teal:      #2DD4BF;
+    --teal-dim:  rgba(45,212,191,0.1);
+    --purple:    #A78BFA;
+    --purple-dim:rgba(167,139,250,0.1);
+
+    --mono: 'JetBrains Mono', monospace;
+    --head: 'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── GRID LINES BACKGROUND ───────────────────────── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(59,158,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(59,158,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── HEADER ──────────────────────────────────────── */
+  header {
+    position: relative;
+    z-index: 10;
+    padding: 56px 60px 40px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(59,158,255,0.05) 0%, transparent 100%);
+  }
+
+  .header-tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    color: var(--blue);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-tag::before {
+    content: '';
+    width: 20px;
+    height: 1px;
+    background: var(--blue);
+    display: block;
+  }
+
+  h1 {
+    font-family: var(--head);
+    font-size: clamp(28px, 4vw, 48px);
+    font-weight: 800;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: var(--text);
+    margin-bottom: 12px;
+  }
+  h1 span { color: var(--blue); }
+
+  .header-sub {
+    font-size: 13px;
+    color: var(--sub);
+    max-width: 600px;
+    line-height: 1.7;
+  }
+
+  .header-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 20px;
+  }
+  .pill {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    padding: 4px 10px;
+    border-radius: 3px;
+    border: 1px solid;
+  }
+  .pill-blue   { border-color: rgba(59,158,255,0.4);   color: var(--blue);   background: var(--blue-dim); }
+  .pill-amber  { border-color: rgba(245,166,35,0.4);   color: var(--amber);  background: var(--amber-dim); }
+  .pill-green  { border-color: rgba(61,214,140,0.4);   color: var(--green);  background: var(--green-dim); }
+  .pill-teal   { border-color: rgba(45,212,191,0.4);   color: var(--teal);   background: var(--teal-dim); }
+  .pill-purple { border-color: rgba(167,139,250,0.4);  color: var(--purple); background: var(--purple-dim); }
+  .pill-red    { border-color: rgba(247,90,90,0.4);    color: var(--red);    background: var(--red-dim); }
+
+  /* ── LAYOUT ──────────────────────────────────────── */
+  main {
+    position: relative;
+    z-index: 5;
+    padding: 48px 60px 80px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* ── SECTION HEADERS ─────────────────────────────── */
+  .sec-head {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 20px;
+    margin-top: 48px;
+  }
+  .sec-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--blue);
+    width: 22px; height: 22px;
+    border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .sec-num.amber  { background: var(--amber); }
+  .sec-num.green  { background: var(--green); color: #0a1f15; }
+  .sec-num.teal   { background: var(--teal);  color: #0a1f1e; }
+  .sec-num.purple { background: var(--purple); }
+  .sec-num.red    { background: var(--red); }
+
+  .sec-title {
+    font-family: var(--head);
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .sec-fn {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    margin-left: 4px;
+  }
+  .sec-desc {
+    font-size: 12px;
+    color: var(--sub);
+    margin-top: 3px;
+  }
+
+  /* ── PIPELINE FLOW ───────────────────────────────── */
+  .pipeline {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    margin: 32px 0 48px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .pipe-step {
+    flex: 1;
+    padding: 20px 18px;
+    border-right: 1px solid var(--border);
+    position: relative;
+    transition: background 0.2s;
+  }
+  .pipe-step:last-child { border-right: none; }
+  .pipe-step:hover { background: var(--s2); }
+  .pipe-step::after {
+    content: '→';
+    position: absolute;
+    right: -10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--dim);
+    font-size: 14px;
+    z-index: 2;
+    background: var(--surface);
+    padding: 2px 0;
+  }
+  .pipe-step:last-child::after { display: none; }
+  .pipe-step:hover::after { background: var(--s2); }
+
+  .ps-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--sub);
+    margin-bottom: 6px;
+  }
+  .ps-title {
+    font-family: var(--head);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+  .ps-note {
+    font-size: 10px;
+    color: var(--sub);
+    line-height: 1.5;
+  }
+  .ps-accent { display: block; width: 24px; height: 2px; border-radius: 1px; margin-bottom: 8px; }
+
+  /* ── CARD GRIDS ──────────────────────────────────── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 20px;
+    transition: border-color 0.2s, background 0.2s, transform 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    border-radius: 6px 6px 0 0;
+  }
+  .card:hover { border-color: var(--border2); background: var(--s2); transform: translateY(-1px); }
+
+  .card.blue::before   { background: var(--blue); }
+  .card.amber::before  { background: var(--amber); }
+  .card.green::before  { background: var(--green); }
+  .card.teal::before   { background: var(--teal); }
+  .card.purple::before { background: var(--purple); }
+  .card.red::before    { background: var(--red); }
+  .card.dim::before    { background: var(--dim); }
+
+  .card-badge {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 2px;
+    margin-bottom: 10px;
+    display: inline-block;
+  }
+  .cb-blue   { background: var(--blue-dim);   color: var(--blue); }
+  .cb-amber  { background: var(--amber-dim);  color: var(--amber); }
+  .cb-green  { background: var(--green-dim);  color: var(--green); }
+  .cb-teal   { background: var(--teal-dim);   color: var(--teal); }
+  .cb-purple { background: var(--purple-dim); color: var(--purple); }
+  .cb-red    { background: var(--red-dim);    color: var(--red); }
+  .cb-dim    { background: rgba(255,255,255,0.05); color: var(--sub); }
+
+  .card-title {
+    font-family: var(--head);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+    letter-spacing: -0.01em;
+  }
+  .card-body {
+    font-size: 11px;
+    color: var(--sub);
+    line-height: 1.65;
+  }
+  .card-body b { color: var(--text); font-weight: 500; }
+  .mono-inline {
+    font-family: var(--mono);
+    font-size: 10px;
+    background: rgba(255,255,255,0.05);
+    padding: 1px 5px;
+    border-radius: 2px;
+    color: var(--blue);
+  }
+
+  /* ── DECISION BOX ────────────────────────────────── */
+  .decision {
+    background: var(--s2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--amber);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 12px 0;
+  }
+  .decision-q {
+    font-family: var(--head);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 14px;
+  }
+  .decision-row { display: flex; gap: 12px; }
+  .decision-opt {
+    flex: 1;
+    border-radius: 4px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+  }
+  .opt-yes { background: var(--green-dim); border-color: rgba(61,214,140,0.25); }
+  .opt-no  { background: var(--amber-dim); border-color: rgba(245,166,35,0.25); }
+  .opt-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .opt-yes .opt-label { color: var(--green); }
+  .opt-no  .opt-label { color: var(--amber); }
+  .opt-body { font-size: 11px; line-height: 1.6; color: var(--sub); }
+
+  /* ── SCHEMA BOX ──────────────────────────────────── */
+  .schema {
+    background: var(--s3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 12px 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .schema-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--sub);
+    flex-shrink: 0;
+  }
+  .schema-fields {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .field {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 3px;
+    border: 1px solid var(--border2);
+    background: rgba(59,158,255,0.06);
+    color: var(--blue);
+  }
+
+  /* ── LAYER STACK ─────────────────────────────────── */
+  .layers { display: flex; flex-direction: column; gap: 8px; }
+  .layer {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .layer::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+    border-radius: 6px 0 0 6px;
+  }
+  .layer:hover { border-color: var(--border2); background: var(--s2); }
+  .layer.blue::before   { background: var(--blue); }
+  .layer.amber::before  { background: var(--amber); }
+  .layer.green::before  { background: var(--green); }
+  .layer.teal::before   { background: var(--teal); }
+  .layer.purple::before { background: var(--purple); }
+
+  .layer-icon {
+    width: 36px; height: 36px;
+    border-radius: 4px;
+    background: var(--s3);
+    border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .layer-content { flex: 1; }
+  .layer-name {
+    font-family: var(--head);
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 3px;
+  }
+  .layer-desc { font-size: 11px; color: var(--sub); line-height: 1.6; }
+  .layer-tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    align-self: flex-start;
+    margin-top: 2px;
+  }
+  .lt-blue   { background: var(--blue-dim);   color: var(--blue); }
+  .lt-amber  { background: var(--amber-dim);  color: var(--amber); }
+  .lt-green  { background: var(--green-dim);  color: var(--green); }
+  .lt-teal   { background: var(--teal-dim);   color: var(--teal); }
+  .lt-purple { background: var(--purple-dim); color: var(--purple); }
+  .lt-dim    { background: rgba(255,255,255,0.05); color: var(--sub); }
+
+  /* ── FLOW ARROWS BETWEEN SECTIONS ───────────────── */
+  .connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: 8px 0;
+    color: var(--dim);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .connector::before,
+  .connector::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── QUEUE MESSAGE TABLE ─────────────────────────── */
+  .msg-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .msg-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    transition: border-color 0.2s;
+  }
+  .msg-card:hover { border-color: var(--border2); }
+  .msg-type {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 2px;
+  }
+  .msg-body { font-size: 10px; color: var(--sub); line-height: 1.55; }
+
+  /* ── DATA FLOW TIMELINE ──────────────────────────── */
+  .timeline {
+    position: relative;
+    padding-left: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 11px; top: 18px; bottom: 18px;
+    width: 1px;
+    background: linear-gradient(to bottom, var(--blue), var(--teal), var(--green));
+  }
+  .tl-item {
+    position: relative;
+    padding: 0 0 20px;
+  }
+  .tl-item:last-child { padding-bottom: 0; }
+  .tl-dot {
+    position: absolute;
+    left: -34px;
+    top: 14px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--bg);
+    background: var(--blue);
+    z-index: 2;
+  }
+  .tl-dot.amber  { background: var(--amber); }
+  .tl-dot.green  { background: var(--green); }
+  .tl-dot.teal   { background: var(--teal); }
+  .tl-dot.purple { background: var(--purple); }
+
+  .tl-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 18px;
+    transition: border-color 0.2s;
+  }
+  .tl-card:hover { border-color: var(--border2); }
+  .tl-step { font-size: 10px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: var(--sub); margin-bottom: 3px; }
+  .tl-title { font-family: var(--head); font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .tl-desc { font-size: 11px; color: var(--sub); line-height: 1.6; }
+
+  /* ── KV PHASES ───────────────────────────────────── */
+  .phase-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    align-items: center;
+    gap: 8px;
+    background: var(--s2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 12px 0;
+  }
+  .phase-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+  .phase-num {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 6px;
+  }
+  .phase-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 3px; font-family: var(--head); }
+  .phase-fn { font-size: 10px; color: var(--blue); font-family: var(--mono); margin-bottom: 6px; }
+  .phase-desc { font-size: 10px; color: var(--sub); line-height: 1.5; }
+  .phase-arrow { color: var(--dim); font-size: 20px; text-align: center; }
+
+  /* ── CONFIG TABLE ────────────────────────────────── */
+  .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cfg {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 18px;
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    transition: border-color 0.2s;
+  }
+  .cfg:hover { border-color: var(--border2); }
+  .cfg-key {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--blue);
+    font-weight: 700;
+    white-space: nowrap;
+    padding-top: 1px;
+    min-width: 140px;
+  }
+  .cfg-val { font-size: 11px; color: var(--sub); line-height: 1.6; }
+  .cfg-val b { color: var(--text); font-weight: 500; }
+
+  /* ── DIVIDER ─────────────────────────────────────── */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 48px 0;
+    position: relative;
+  }
+  .divider::after {
+    content: '//';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg);
+    padding: 0 12px;
+    color: var(--dim);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+
+  /* ── FOOTER ──────────────────────────────────────── */
+  footer {
+    position: relative; z-index: 5;
+    border-top: 1px solid var(--border);
+    padding: 24px 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  /* ── ANIMATIONS ──────────────────────────────────── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .chapter {
+    animation: fadeUp 0.5s ease both;
+  }
+  .chapter:nth-child(1)  { animation-delay: 0.05s; }
+  .chapter:nth-child(2)  { animation-delay: 0.10s; }
+  .chapter:nth-child(3)  { animation-delay: 0.15s; }
+  .chapter:nth-child(4)  { animation-delay: 0.20s; }
+  .chapter:nth-child(5)  { animation-delay: 0.25s; }
+  .chapter:nth-child(6)  { animation-delay: 0.30s; }
+  .chapter:nth-child(7)  { animation-delay: 0.35s; }
+  .chapter:nth-child(8)  { animation-delay: 0.40s; }
+  .chapter:nth-child(9)  { animation-delay: 0.45s; }
+  .chapter:nth-child(10) { animation-delay: 0.50s; }
+
+  /* ── NAV ─────────────────────────────────────────── */
+  .sidenav {
+    position: fixed;
+    right: 28px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 100;
+  }
+  .nav-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--dim);
+    cursor: pointer;
+    transition: background 0.2s, transform 0.2s;
+  }
+  .nav-dot:hover { background: var(--blue); transform: scale(1.5); }
+
+  @media (max-width: 900px) {
+    header, main { padding-left: 24px; padding-right: 24px; }
+    .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+    .pipeline { flex-direction: column; }
+    .pipe-step::after { display: none; }
+    .phase-row { grid-template-columns: 1fr; }
+    .phase-arrow { transform: rotate(90deg); }
+    .decision-row { flex-direction: column; }
+    .msg-grid { grid-template-columns: 1fr 1fr; }
+    .sidenav { display: none; }
+    footer { flex-direction: column; gap: 8px; }
+  }
+
+  /* highlight color swatches */
+  .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 2px;
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ── SIDE NAV ─────────────────────────────────────── -->
+<nav class="sidenav" aria-label="Page sections">
+  <div class="nav-dot" title="Overview" onclick="document.getElementById('overview').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Config"   onclick="document.getElementById('config').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="UI"       onclick="document.getElementById('ui').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Extraction" onclick="document.getElementById('extraction').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Chunking" onclick="document.getElementById('chunking').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Diff"     onclick="document.getElementById('diff').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Kv Engine" onclick="document.getElementById('kv').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Render"   onclick="document.getElementById('render').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Queue"    onclick="document.getElementById('queue').scrollIntoView({behavior:'smooth'})"></div>
+  <div class="nav-dot" title="Data Flow" onclick="document.getElementById('dataflow').scrollIntoView({behavior:'smooth'})"></div>
+</nav>
+
+<!-- ── HEADER ─────────────────────────────────────────── -->
+<header>
+  <div class="header-tag">System Architecture Map</div>
+  <h1>PDF Diff <span>Engine</span></h1>
+  <p class="header-sub">A complete high-level map of every layer — from file selection through OCR extraction, two-pass diffing, C++ spatial analysis, and synchronized rendering.</p>
+  <div class="header-pills">
+    <span class="pill pill-blue">Python · tkinter</span>
+    <span class="pill pill-green">C++ · pybind11</span>
+    <span class="pill pill-amber">Tesseract OCR</span>
+    <span class="pill pill-teal">pypdfium2</span>
+    <span class="pill pill-purple">pdfplumber</span>
+    <span class="pill pill-blue">difflib LCS</span>
+    <span class="pill pill-teal">PIL / Pillow</span>
+  </div>
+</header>
+
+<main>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 0. OVERVIEW PIPELINE                              -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="overview">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--blue);">0</div>
+    <div>
+      <div class="sec-title">End-to-end pipeline <span class="sec-fn">— bird's eye view</span></div>
+      <div class="sec-desc">Five stages that transform two PDF files into a visual, word-level diff</div>
+    </div>
+  </div>
+
+  <div class="pipeline">
+    <div class="pipe-step">
+      <span class="ps-accent" style="background:var(--sub);"></span>
+      <div class="ps-label">Stage 1</div>
+      <div class="ps-title">File selection</div>
+      <div class="ps-note">User picks Old PDF + New PDF via file dialog. Both paths stored. Compare button enabled.</div>
+    </div>
+    <div class="pipe-step">
+      <span class="ps-accent" style="background:var(--amber);"></span>
+      <div class="ps-label">Stage 2</div>
+      <div class="ps-title">Extraction</div>
+      <div class="ps-note">pdfplumber native text → if &lt; 20 words: pypdfium2 render + Tesseract OCR per page.</div>
+    </div>
+    <div class="pipe-step">
+      <span class="ps-accent" style="background:var(--blue);"></span>
+      <div class="ps-label">Stage 3</div>
+      <div class="ps-title">Chunk + Seam</div>
+      <div class="ps-note">10-page batches. Seam detection finds safe cut point (6+ consecutive identical words).</div>
+    </div>
+    <div class="pipe-step">
+      <span class="ps-accent" style="background:var(--green);"></span>
+      <div class="ps-label">Stage 4</div>
+      <div class="ps-title">Two-pass Diff</div>
+      <div class="ps-note">Python difflib LCS first pass → C++ Kv spatial engine second pass.</div>
+    </div>
+    <div class="pipe-step">
+      <span class="ps-accent" style="background:var(--teal);"></span>
+      <div class="ps-label">Stage 5</div>
+      <div class="ps-title">Render + Display</div>
+      <div class="ps-note">pypdfium2 renders pages → PIL draws highlight overlays → tkinter side-by-side canvas.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 1. CONFIG                                         -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="config">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--sub);">1</div>
+    <div>
+      <div class="sec-title">Global configuration constants</div>
+      <div class="sec-desc">Every tuning knob that drives behaviour across the whole system</div>
+    </div>
+  </div>
+  <div class="config-grid">
+    <div class="cfg"><span class="cfg-key">RENDER_SCALE = 1.5</span><span class="cfg-val">PDF pages rendered at <b>1.5× native resolution</b>. Higher = sharper highlights, more RAM. Used for both rendering and OCR image generation.</span></div>
+    <div class="cfg"><span class="cfg-key">CHUNK_PAGES = 10</span><span class="cfg-val">Process <b>10 pages at a time</b>. Prevents loading entire book into RAM. UI updates progressively as each chunk finishes.</span></div>
+    <div class="cfg"><span class="cfg-key">SEAM_MIN_RUN = 6</span><span class="cfg-val">Require <b>6+ consecutive identical words</b> to declare a safe chunk boundary. Prevents splitting mid-sentence.</span></div>
+    <div class="cfg"><span class="cfg-key">SEAM_SCAN_PCT = 0.35</span><span class="cfg-val">Only scan the <b>last 35% of each chunk</b> for a seam. Balances thoroughness vs. performance.</span></div>
+    <div class="cfg"><span class="cfg-key">OCR_MIN_WORD_COUNT = 20</span><span class="cfg-val">If pdfplumber extracts <b>fewer than 20 words</b> from a page → treat as scanned image and trigger OCR fallback.</span></div>
+    <div class="cfg"><span class="cfg-key">OCR_MIN_CONF = 30</span><span class="cfg-val">Tesseract confidence threshold. Words scoring <b>below 30/100</b> are discarded as likely misreads from poor scan quality.</span></div>
+    <div class="cfg"><span class="cfg-key">PAGE_GAP = 28</span><span class="cfg-val"><b>28px vertical gap</b> between rendered page images on the canvas. Visual breathing room between pages.</span></div>
+    <div class="cfg">
+      <span class="cfg-key">HIGHLIGHT COLORS</span>
+      <span class="cfg-val">
+        <span class="swatch" style="background:rgba(255,213,79,0.85);"></span><b>Yellow</b> (255,213,79,115) = removed words in old PDF<br>
+        <span class="swatch" style="background:rgba(79,195,247,0.85);"></span><b>Blue</b> (79,195,247,115) = added words in new PDF<br>
+        Alpha 115/255 = semi-transparent so text shows through.
+      </span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 2. UI                                             -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="ui">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--sub);">2</div>
+    <div>
+      <div class="sec-title">User interface <span class="sec-fn">— setup_ui()</span></div>
+      <div class="sec-desc">Every visible element and the logic wiring it</div>
+    </div>
+  </div>
+  <div class="layers">
+    <div class="layer blue">
+      <div class="layer-icon">📊</div>
+      <div class="layer-content">
+        <div class="layer-name">Progress bar</div>
+        <div class="layer-desc">Thin 3px <span class="mono-inline">ttk.Progressbar</span> at the very top. Starts at 2% on Compare click → increments per chunk (5%…90%) → 100% on completion → auto-resets to 0 after 2 seconds via <span class="mono-inline">root.after(2000)</span>.</div>
+      </div>
+      <div class="layer-tag lt-dim">ttk widget</div>
+    </div>
+    <div class="layer amber">
+      <div class="layer-icon">🏷</div>
+      <div class="layer-content">
+        <div class="layer-name">OCR status badge</div>
+        <div class="layer-desc">Checked at import time with <span class="mono-inline">try: import pytesseract</span>. Shows green "OCR ✓" or red "OCR ✗ (pip install pytesseract)". Zero runtime cost — set once at startup.</div>
+      </div>
+      <div class="layer-tag lt-amber">startup check</div>
+    </div>
+    <div class="layer blue">
+      <div class="layer-icon">⬆</div>
+      <div class="layer-content">
+        <div class="layer-name">Three-scrollbar system</div>
+        <div class="layer-desc"><b>Left scrollbar</b> — scrolls old canvas independently, updates <span class="mono-inline">sync_offset_y</span>. <b>Center scrollbar</b> — synced: moves old canvas then offsets new canvas by stored offset. <b>Right scrollbar</b> — scrolls new canvas independently, updates offset.</div>
+      </div>
+      <div class="layer-tag lt-blue">3-way sync</div>
+    </div>
+    <div class="layer teal">
+      <div class="layer-icon">🖱</div>
+      <div class="layer-content">
+        <div class="layer-name">Mouse wheel handler — <span class="mono-inline">on_mousewheel()</span></div>
+        <div class="layer-desc">Bound to both canvases. Cross-platform: Windows uses <span class="mono-inline">MouseWheel</span> (delta/120), Linux uses <span class="mono-inline">Button-4/5</span>. Scrolling old canvas → moves new by <span class="mono-inline">+sync_offset_y</span>. Scrolling new → moves old by <span class="mono-inline">−sync_offset_y</span>. Returns "break" to stop event propagation.</div>
+      </div>
+      <div class="layer-tag lt-teal">cross-platform</div>
+    </div>
+    <div class="layer purple">
+      <div class="layer-icon">↕</div>
+      <div class="layer-content">
+        <div class="layer-name">Offset tracking — <span class="mono-inline">sync_offset_y</span></div>
+        <div class="layer-desc">Key state variable. When you scroll panels independently, the difference between their scroll positions is stored as <span class="mono-inline">sync_offset_y = canvas_new.canvasy(0) − canvas_old.canvasy(0)</span>. The center scrollbar preserves this gap while moving both panels together.</div>
+      </div>
+      <div class="layer-tag lt-purple">key state</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 3. EXTRACTION                                     -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="extraction">
+  <div class="sec-head">
+    <div class="sec-num" class="amber">3</div>
+    <div>
+      <div class="sec-title">Text extraction <span class="sec-fn">— extract_page_range()</span></div>
+      <div class="sec-desc">Per-page routing: native pdfplumber or OCR fallback. Both produce identical output.</div>
+    </div>
+  </div>
+
+  <div class="decision">
+    <div class="decision-q">Per page: how many native words did pdfplumber find?</div>
+    <div class="decision-row">
+      <div class="decision-opt opt-yes">
+        <div class="opt-label">≥ 20 words → Native path</div>
+        <div class="opt-body">Use pdfplumber word list directly. Each word comes with text, x0, top, x1, bottom, page. Fast, pixel-perfect coordinates embedded in the PDF. No image rendering needed.</div>
+      </div>
+      <div class="decision-opt opt-no">
+        <div class="opt-label">&lt; 20 words → OCR fallback</div>
+        <div class="opt-body">Render page to image via pypdfium2 at RENDER_SCALE. Convert to grayscale → boost contrast 2× → sharpen. Run Tesseract. Filter words below confidence 30. Divide pixel coords by RENDER_SCALE to convert back to PDF-space units.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-3" style="margin-top:12px;">
+    <div class="card amber">
+      <div class="card-badge cb-dim">OCR step 1</div>
+      <div class="card-title">Image preprocessing</div>
+      <div class="card-body">Convert to grayscale → <b>contrast × 2.0</b> via ImageEnhance → SHARPEN filter. Makes text edges crisper for better character recognition.</div>
+    </div>
+    <div class="card amber">
+      <div class="card-badge cb-amber">OCR step 2</div>
+      <div class="card-title">Tesseract data extraction</div>
+      <div class="card-body"><span class="mono-inline">image_to_data()</span> returns per-word bounding boxes, text strings, and confidence scores. Words below <b>conf = 30</b> are discarded.</div>
+    </div>
+    <div class="card amber">
+      <div class="card-badge cb-amber">OCR step 3</div>
+      <div class="card-title">Coordinate rescaling</div>
+      <div class="card-body">Divide pixel positions by <span class="mono-inline">RENDER_SCALE (1.5)</span> to get PDF point coordinates. OCR words now share the same coordinate system as native words.</div>
+    </div>
+  </div>
+
+  <div class="schema">
+    <span class="schema-label">Unified word schema — both paths output:</span>
+    <div class="schema-fields">
+      <span class="field">text: "hello"</span>
+      <span class="field">x0: left edge</span>
+      <span class="field">top: top edge</span>
+      <span class="field">x1: right edge</span>
+      <span class="field">bottom: bottom edge</span>
+      <span class="field">page: 0-based index</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 4. CHUNKING & SEAM                                -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="chunking">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--sub);">4</div>
+    <div>
+      <div class="sec-title">Chunking + seam detection <span class="sec-fn">— find_safe_seam()</span></div>
+      <div class="sec-desc">How large documents are processed without exhausting memory</div>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="card blue">
+      <div class="card-badge cb-blue">Memory strategy</div>
+      <div class="card-title">10-page chunks</div>
+      <div class="card-body">Words extracted 10 pages at a time. A <b>tail buffer</b> carries leftover words from the previous chunk into the next. The formula: <span class="mono-inline">old_words = old_tail + old_chunk_words</span>. Progress bar advances per chunk.</div>
+    </div>
+    <div class="card blue">
+      <div class="card-badge cb-blue">Seam algorithm</div>
+      <div class="card-title">find_safe_seam()</div>
+      <div class="card-body">Scans the <b>last 35%</b> of each chunk for a run of <b>6+ consecutive identical words</b> in both PDFs. That position is the "safe cut". Words before the cut are committed to the diff engine. Words after become the new tail.</div>
+    </div>
+  </div>
+  <div style="margin-top:12px;">
+    <div class="pipeline" style="margin:0;">
+      <div class="pipe-step"><div class="ps-label">prev tail</div><div class="ps-title">Leftover words</div><div class="ps-note">Carried from last chunk iteration</div></div>
+      <div class="pipe-step"><div class="ps-label">+ new chunk</div><div class="ps-title">Pages N → N+9</div><div class="ps-note">Freshly extracted words</div></div>
+      <div class="pipe-step"><div class="ps-label">seam search</div><div class="ps-title">Find safe cut</div><div class="ps-note">Last 35%, 6+ word run match</div></div>
+      <div class="pipe-step"><div class="ps-label">commit</div><div class="ps-title">Before seam → diff</div><div class="ps-note">Safe to process</div></div>
+      <div class="pipe-step"><div class="ps-label">new tail</div><div class="ps-title">After seam</div><div class="ps-note">Carries into next iteration</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 5. DIFF ENGINE                                    -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="diff">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--green);color:#0a1f15;">5</div>
+    <div>
+      <div class="sec-title">Two-pass diff engine</div>
+      <div class="sec-desc">Python LCS produces candidates — C++ Kv spatial engine refines them</div>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="card green">
+      <div class="card-badge cb-blue">Pass 1 — Python</div>
+      <div class="card-title">LCS via difflib.SequenceMatcher</div>
+      <div class="card-body">Compares flat word-text lists from old vs new commit. Returns opcodes: <b>equal</b>, <b>replace</b>, <b>insert</b>, <b>delete</b>.<br><br>
+        • replace / delete → candidate <b>removed</b> words<br>
+        • replace / insert → candidate <b>added</b> words<br><br>
+        Fast but text-only — doesn't understand document structure.
+      </div>
+    </div>
+    <div class="card green">
+      <div class="card-badge cb-green">Pass 2 — C++</div>
+      <div class="card-title">Kv spatial engine via pybind11</div>
+      <div class="card-body">Receives only LCS-flagged candidates. Groups words spatially into lines → sentences → paragraphs. Matches paragraphs by Jaccard similarity (threshold 0.55). For matched pairs: only changed words are highlighted. For unmatched: full block flagged.<br><br>Much more precise — avoids false positives from common words that shift position.</div>
+    </div>
+  </div>
+  <div class="card dim" style="margin-top:12px;">
+    <div class="card-badge cb-dim">Why both passes are needed</div>
+    <div class="card-title">LCS alone over-highlights common words</div>
+    <div class="card-body">The word "the" appears thousands of times. LCS treats each occurrence as independent and flags position shifts as removals/additions. The Kv pass understands that "the" in paragraph 3 and "the" in paragraph 3 of the new file are <b>the same word in the same place</b>, and suppresses the false highlight. Result: only genuinely changed words glow.</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 6. KV C++ ENGINE                                  -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="kv">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--green);color:#0a1f15;">6</div>
+    <div>
+      <div class="sec-title">Inside the C++ Kv engine <span class="sec-fn">— kv_mechanism.cpp</span></div>
+      <div class="sec-desc">Three-phase spatial analysis compiled to a native Python extension via pybind11</div>
+    </div>
+  </div>
+
+  <div class="phase-row">
+    <div class="phase-box">
+      <div class="phase-num" style="color:var(--blue);">①</div>
+      <div class="phase-title">Build Sentences</div>
+      <div class="phase-fn">build_sentences()</div>
+      <div class="phase-desc">Sort words by page → y-band (3pt) → x. Words within 3pt vertical tolerance merge into a Sentence with combined text, min/max bounds, x-start.</div>
+    </div>
+    <div class="phase-arrow">→</div>
+    <div class="phase-box">
+      <div class="phase-num" style="color:var(--amber);">②</div>
+      <div class="phase-title">Build Paragraphs</div>
+      <div class="phase-fn">build_paragraphs()</div>
+      <div class="phase-desc">Adjacent sentences on same page within 20pt x-drift and 18pt y-gap merge into Paragraph. Sentences that indent or jump far → new paragraph.</div>
+    </div>
+    <div class="phase-arrow">→</div>
+    <div class="phase-box">
+      <div class="phase-num" style="color:var(--green);">③</div>
+      <div class="phase-title">Match Paragraphs</div>
+      <div class="phase-fn">match_paragraphs()</div>
+      <div class="phase-desc">Jaccard similarity between each old/new paragraph pair. ≥ 0.55 → matched pair, diff only changed words. &lt; 0.55 → full block as add/remove.</div>
+    </div>
+  </div>
+
+  <div class="decision" style="margin-top:12px;">
+    <div class="decision-q">For each old paragraph in the Kv engine:</div>
+    <div class="decision-row">
+      <div class="decision-opt opt-yes">
+        <div class="opt-label">Jaccard ≥ 0.55 → Matched pair</div>
+        <div class="opt-body">Build word sets for old and new paragraph. Words in old but not in new → added to removed list. Words in new but not in old → added to added list. Unchanged words: no highlight. Surgical precision.</div>
+      </div>
+      <div class="decision-opt opt-no">
+        <div class="opt-label">Jaccard &lt; 0.55 → Unmatched</div>
+        <div class="opt-body">Old paragraph has no match → every word → removed (yellow). New paragraph has no match → every word → added (blue). Treated as fully deleted or fully inserted block.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="card teal">
+      <div class="card-badge cb-teal">pybind11 bridge</div>
+      <div class="card-title">Python ↔ C++ interface</div>
+      <div class="card-body"><span class="mono-inline">PYBIND11_MODULE(kv_mechanism, m)</span> registers <span class="mono-inline">run_kv_diff()</span> as <span class="mono-inline">kv_mechanism.run_diff()</span>. Compiles to a <span class="mono-inline">.so</span> / <span class="mono-inline">.pyd</span> shared library. Python passes lists of dicts; pybind11 handles all type conversion automatically.</div>
+    </div>
+    <div class="card teal">
+      <div class="card-badge cb-dim">Page normalization</div>
+      <div class="card-title">normalize_pages() — why it's needed</div>
+      <div class="card-body">LCS-flagged words from pages 40–45 are sent to C++. The engine's spatial grouping works best with 0-based pages. <span class="mono-inline">normalize_pages()</span> subtracts the minimum page number before the call, then the offsets are added back to restore original page numbers for rendering.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 7. RENDERING                                      -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="render">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--teal);color:#0a1f1e;">7</div>
+    <div>
+      <div class="sec-title">Page rendering + highlight painting</div>
+      <div class="sec-desc">From PDF page to annotated image on the canvas — render_page() + render_and_queue_pages()</div>
+    </div>
+  </div>
+  <div class="pipeline">
+    <div class="pipe-step"><div class="ps-label">pypdfium2</div><div class="ps-title">Render page</div><div class="ps-note">At RENDER_SCALE=1.5. Returns bitmap.</div></div>
+    <div class="pipe-step"><div class="ps-label">PIL convert</div><div class="ps-title">→ RGBA image</div><div class="ps-note">Supports alpha channel for transparency.</div></div>
+    <div class="pipe-step"><div class="ps-label">PIL overlay</div><div class="ps-title">Draw highlight rects</div><div class="ps-note">Per-word semi-transparent rectangle. Coords × RENDER_SCALE ± 2px padding.</div></div>
+    <div class="pipe-step"><div class="ps-label">PIL composite</div><div class="ps-title">Alpha composite</div><div class="ps-note">Merge page + overlay into final RGBA image.</div></div>
+    <div class="pipe-step"><div class="ps-label">Queue → tkinter</div><div class="ps-title">PhotoImage</div><div class="ps-note">Converted on main thread, appended to photos list to prevent GC.</div></div>
+  </div>
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="card dim">
+      <div class="card-badge cb-dim">Coordinate formula</div>
+      <div class="card-title">Highlight rectangle math</div>
+      <div class="card-body">
+        <span class="mono-inline">x0_px = word.x0 × 1.5 − 2</span><br>
+        <span class="mono-inline">y0_px = word.top × 1.5 − 2</span><br>
+        <span class="mono-inline">x1_px = word.x1 × 1.5 + 2</span><br>
+        <span class="mono-inline">y1_px = word.bottom × 1.5 + 2</span><br><br>
+        The ±2px expansion ensures the highlight fully covers the glyph with a small visual margin.
+      </div>
+    </div>
+    <div class="card dim">
+      <div class="card-badge cb-dim">Threading safety</div>
+      <div class="card-title">Why the queue is essential</div>
+      <div class="card-body"><b>tkinter is not thread-safe.</b> Only the main thread may draw to canvases. The worker thread puts rendered PIL Images into <span class="mono-inline">self.q</span> (a thread-safe Queue). The main thread polls every 50ms via <span class="mono-inline">process_queue()</span> → converts to PhotoImage → draws on canvas.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 8. QUEUE MESSAGES                                 -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="queue">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--sub);">8</div>
+    <div>
+      <div class="sec-title">Queue message protocol <span class="sec-fn">— process_queue()</span></div>
+      <div class="sec-desc">Seven message types the background worker sends to the UI thread</div>
+    </div>
+  </div>
+  <div class="msg-grid">
+    <div class="msg-card">
+      <div class="msg-type" style="background:rgba(255,255,255,0.05);color:var(--sub);">"status"</div>
+      <div class="msg-body">Updates status label in grey. Used for normal progress text like "Processing pages 1–10…"</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:var(--amber-dim);color:var(--amber);">"warn"</div>
+      <div class="msg-body">Updates status label in amber. OCR fallback notifications, page extraction errors, missing pytesseract.</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:rgba(255,255,255,0.05);color:var(--sub);">"progress"</div>
+      <div class="msg-body">Sets progress bar value 0–100. Calculated as <span class="mono-inline">5 + (chunk/total) × 85</span> per chunk.</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:var(--blue-dim);color:var(--blue);">"page_old"</div>
+      <div class="msg-body">Rendered PIL Image for left canvas. Converted to PhotoImage, appended to old_photos, drawn at old_y position.</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:var(--blue-dim);color:var(--blue);">"page_new"</div>
+      <div class="msg-body">Same for right canvas. new_y advances by image height + PAGE_GAP (28px) after each page is placed.</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:var(--green-dim);color:var(--green);">"done"</div>
+      <div class="msg-body">Shows "✅ Done — N removed · M added". Re-enables Compare button. Progress bar resets after 2s.</div>
+    </div>
+    <div class="msg-card">
+      <div class="msg-type" style="background:var(--red-dim);color:var(--red);">"error"</div>
+      <div class="msg-body">Shows red error message in status bar. Re-enables Compare. Full traceback printed to console via <span class="mono-inline">traceback.format_exc()</span>.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════ -->
+<!-- 9. FULL DATA FLOW                                 -->
+<!-- ══════════════════════════════════════════════════ -->
+<div class="chapter" id="dataflow">
+  <div class="sec-head">
+    <div class="sec-num" style="background:var(--blue);">9</div>
+    <div>
+      <div class="sec-title">Complete data flow — end to end</div>
+      <div class="sec-desc">Every transformation a single word goes through, from raw PDF to visible highlight</div>
+    </div>
+  </div>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="tl-dot"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 1</div>
+        <div class="tl-title">PDF files on disk</div>
+        <div class="tl-desc">Two files selected. Opened by both <span class="mono-inline">pdfplumber</span> (text) and <span class="mono-inline">pypdfium2</span> (rendering). Both document handles stay open for the full worker thread lifetime, closed in the finally block.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot amber"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 2</div>
+        <div class="tl-title">Per-page extraction → word dicts</div>
+        <div class="tl-desc">pdfplumber native if ≥ 20 words. OCR via pypdfium2 + Tesseract if &lt; 20. Both paths produce identical <span class="mono-inline">{text, x0, top, x1, bottom, page}</span> dicts. The rest of the pipeline is path-agnostic.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 3</div>
+        <div class="tl-title">Tail merge + seam cut → committed word lists</div>
+        <div class="tl-desc">Previous tail + current chunk = full working set. Seam algorithm finds the safe cut point. Words before seam = <b>old_commit + new_commit</b> — sent to the diff engine. Words after seam = new tail for the next iteration.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 4</div>
+        <div class="tl-title">LCS diff → candidate changed words</div>
+        <div class="tl-desc"><span class="mono-inline">difflib.SequenceMatcher</span> compares word-text sequences. Replace/delete opcodes → candidate removed words. Replace/insert opcodes → candidate added words. These lists are the inputs to the C++ pass.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot" style="background:var(--green);"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 5</div>
+        <div class="tl-title">Kv spatial pass → final changed words</div>
+        <div class="tl-desc">C++ engine builds sentences → paragraphs → Jaccard-matches pairs → returns only truly changed words with their original bounding box coordinates. Page numbers restored via <span class="mono-inline">+ old_min_page / + new_min_page</span>.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot" style="background:var(--teal);"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 6</div>
+        <div class="tl-title">Render pages → draw highlight overlays</div>
+        <div class="tl-desc">pypdfium2 renders each page at 1.5×. PIL draws semi-transparent colored rectangles over each changed word's bounding box. Alpha composite merges page image + overlay into a final RGBA image.</div>
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot" style="background:var(--purple);"></div>
+      <div class="tl-card">
+        <div class="tl-step">Step 7</div>
+        <div class="tl-title">Queue → tkinter canvas → user sees result</div>
+        <div class="tl-desc">Worker puts images in <span class="mono-inline">self.q</span>. Main thread polls every 50ms, converts to <span class="mono-inline">ImageTk.PhotoImage</span>, draws to <span class="mono-inline">canvas_old</span> / <span class="mono-inline">canvas_new</span>. Scroll region updated. Both panels scroll in sync via <span class="mono-inline">sync_offset_y</span>.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<footer>
+  <span>PDF Diff Engine — System Architecture Map</span>
+  <span>Python · C++ · pybind11 · Tesseract OCR · pypdfium2 · difflib · PIL</span>
+</footer>
+
+</body>
+</html>
