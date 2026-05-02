@@ -26,9 +26,9 @@ from pathlib import Path
 import pypdfium2 as pdfium
 from PIL import ImageTk
 
-from layer1_extraction import extract_page_range, get_page_count
-from layer2_diff        import find_safe_seam, diff_words
-from layer3_paint       import render_page_range, REMOVED_COLOR, ADDED_COLOR, RENDER_SCALE
+from Tested.Layer_Architecture.layer1_extraction import extract_page_range, get_page_count
+from Tested.Layer_Architecture.layer2_diff        import find_safe_seam, diff_words
+from Tested.Layer_Architecture.layer3_paint       import render_page_range, REMOVED_COLOR, ADDED_COLOR, RENDER_SCALE
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 CHUNK_PAGES = 10

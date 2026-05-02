@@ -297,7 +297,7 @@ class PDFDiffApp:
         try:
             # Try loading Kv C++ engine
             try:
-                import kv_mechanism
+                import Test.Kv_Text.kv_mechanism as kv_mechanism
                 has_kv = True
             except ImportError:
                 has_kv = False

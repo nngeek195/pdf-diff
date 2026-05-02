@@ -10,10 +10,10 @@ from pathlib import Path
 
 # import the engine
 try:
-    from pdf_diff_engine import build_diff_pdf
+    from Tested.pdf_diff_engine import build_diff_pdf
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from pdf_diff_engine import build_diff_pdf
+    from Tested.pdf_diff_engine import build_diff_pdf
 
 
 # pretty colors! 🎨

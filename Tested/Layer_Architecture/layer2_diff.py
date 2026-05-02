@@ -85,7 +85,7 @@ def diff_words(old_commit: list[dict],
 
 if __name__ == '__main__':
     import sys
-    from layer1_extraction import extract_page_range
+    from Tested.Layer_Architecture.layer1_extraction import extract_page_range
 
     if len(sys.argv) < 3:
         print("Usage: python layer2_diff.py <old.pdf> <new.pdf>")

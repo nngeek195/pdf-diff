@@ -448,7 +448,7 @@ class PDFDiffApp:
         old_pdf_doc = new_pdf_doc = None
         try:
             try:
-                import kv_mechanism
+                import Test.Kv_image.kv_mechanism as kv_mechanism
                 has_kv = True
             except ImportError:
                 has_kv = False
